@@ -6,6 +6,7 @@
 
 ## Base class for all LLM providers. Each provider implements the
 ## send_message / test_connection / get_available_models interface.
+## HTTP requests are async (use await) to avoid freezing the UI.
 class_name LLMProvider extends RefCounted
 
 signal request_completed(response: Dictionary)
@@ -23,6 +24,16 @@ var model: String = ""
 var timeout: float = 120.0
 ## Temperature for generation.
 var temperature: float = 0.7
+
+## Internal SceneTree reference for awaiting.
+var _tree: SceneTree
+
+
+func _get_tree() -> SceneTree:
+	if _tree:
+		return _tree
+	_tree = Engine.get_main_loop() as SceneTree
+	return _tree
 
 
 ## Send a chat completion request with tools.
@@ -44,7 +55,7 @@ func get_available_models() -> Array[String]:
 	return []
 
 
-# -- HTTP helpers --------------------------------------------------------------
+# -- HTTP helpers (async — use await) ------------------------------------------
 
 func _http_request(url: String, method: int = HTTPClient.METHOD_POST, body: String = "", extra_headers: Dictionary = {}) -> Dictionary:
 	var uri := url
@@ -85,11 +96,15 @@ func _http_request(url: String, method: int = HTTPClient.METHOD_POST, body: Stri
 	if err != OK:
 		return {"error": "Failed to connect to %s:%d (error %d)" % [host, port, err]}
 
+	var tree := _get_tree()
 	var elapsed := 0.0
 	while client.get_status() == HTTPClient.STATUS_CONNECTING or client.get_status() == HTTPClient.STATUS_RESOLVING:
 		client.poll()
-		OS.delay_msec(100)
-		elapsed += 0.1
+		if tree:
+			await tree.create_timer(0.05).timeout
+		else:
+			OS.delay_msec(50)
+		elapsed += 0.05
 		if elapsed > timeout:
 			return {"error": "Connection timeout after %.0fs" % timeout}
 
@@ -110,8 +125,11 @@ func _http_request(url: String, method: int = HTTPClient.METHOD_POST, body: Stri
 	elapsed = 0.0
 	while client.get_status() == HTTPClient.STATUS_REQUESTING:
 		client.poll()
-		OS.delay_msec(100)
-		elapsed += 0.1
+		if tree:
+			await tree.create_timer(0.05).timeout
+		else:
+			OS.delay_msec(50)
+		elapsed += 0.05
 		if elapsed > timeout:
 			return {"error": "Request timeout after %.0fs" % timeout}
 
@@ -126,7 +144,10 @@ func _http_request(url: String, method: int = HTTPClient.METHOD_POST, body: Stri
 		if chunk.size() > 0:
 			response_body.append_array(chunk)
 		else:
-			OS.delay_msec(50)
+			if tree:
+				await tree.create_timer(0.02).timeout
+			else:
+				OS.delay_msec(20)
 
 	return {"status_code": status_code, "body": response_body.get_string_from_utf8()}
 

@@ -24,7 +24,7 @@ func send_message(messages: Array, tools: Array) -> Dictionary:
 	if not tools.is_empty():
 		payload["tools"] = _format_tools(tools)
 
-	var result := _http_request(url, HTTPClient.METHOD_POST, JSON.stringify(payload))
+	var result: Dictionary = await _http_request(url, HTTPClient.METHOD_POST, JSON.stringify(payload))
 	if result.has("error"):
 		return {"error": result["error"]}
 	if result["status_code"] != 200:
@@ -49,12 +49,12 @@ func send_message(messages: Array, tools: Array) -> Dictionary:
 
 
 func test_connection() -> bool:
-	var result := _http_request("%s/api/tags" % base_url, HTTPClient.METHOD_GET)
+	var result: Dictionary = await _http_request("%s/api/tags" % base_url, HTTPClient.METHOD_GET)
 	return not result.has("error") and result.get("status_code", 0) == 200
 
 
 func get_available_models() -> Array[String]:
-	var result := _http_request("%s/api/tags" % base_url, HTTPClient.METHOD_GET)
+	var result: Dictionary = await _http_request("%s/api/tags" % base_url, HTTPClient.METHOD_GET)
 	if result.has("error"):
 		return []
 	var data: Variant = _parse_json(result.get("body", ""))

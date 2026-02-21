@@ -5,6 +5,7 @@
 ###################################################
 
 ## The agentic loop: PLAN → TOOLS → VERIFY → ITERATE.
+## Uses await for async LLM calls to keep the UI responsive.
 class_name AgentExecutor extends RefCounted
 
 signal step_started(step_number: int, phase: String)
@@ -22,6 +23,8 @@ var conversation: Array = []
 var music_tools: MusicTools = MusicTools.new()
 var current_turn: int = 0
 var _running: bool = false
+## Track whether the agent has made any actual tool calls this session.
+var _has_called_tools: bool = false
 
 
 func send_message(user_message: String) -> void:
@@ -30,6 +33,7 @@ func send_message(user_message: String) -> void:
 		return
 	_running = true
 	current_turn = 0
+	_has_called_tools = false
 
 	if conversation.is_empty():
 		conversation.push_back({"role": "system", "content": AgentSystemPrompt.build()})
@@ -41,6 +45,7 @@ func reset_conversation() -> void:
 	conversation.clear()
 	current_turn = 0
 	state = AgentState.IDLE
+	_has_called_tools = false
 
 
 func is_running() -> bool:
@@ -60,7 +65,7 @@ func _run_agent_loop() -> void:
 		state = AgentState.PLANNING if current_turn == 1 else AgentState.EXECUTING
 		step_started.emit(current_turn, "Planning" if current_turn == 1 else "Executing")
 
-		var response := provider.send_message(conversation, music_tools.tool_definitions)
+		var response: Dictionary = await provider.send_message(conversation, music_tools.tool_definitions)
 		if response.has("error"):
 			state = AgentState.ERROR
 			_running = false
@@ -74,6 +79,14 @@ func _run_agent_loop() -> void:
 			agent_message.emit(content)
 
 		if tool_calls.is_empty():
+			# If the LLM just returned text without calling tools on the first turn,
+			# nudge it to actually use tools.
+			if not _has_called_tools and current_turn <= 2:
+				conversation.push_back({"role": "assistant", "content": content})
+				conversation.push_back({"role": "user", "content": "You must use the tool functions to create the music. Start by calling create_song, then add_instrument, create_pattern, add_notes, and set_arrangement. Call the tools now."})
+				step_completed.emit(current_turn, "Re-prompting to use tools")
+				continue
+
 			state = AgentState.DONE
 			_running = false
 			step_completed.emit(current_turn, "Done")
@@ -95,8 +108,13 @@ func _run_agent_loop() -> void:
 			step_started.emit(current_turn, "Tool: %s" % tool_name)
 			var result := music_tools.execute(tool_name, tool_args)
 			tool_called.emit(tool_name, tool_args, result)
+			_has_called_tools = true
 
 			conversation.push_back({"role": "tool", "content": JSON.stringify(result), "tool_call_id": tool_id, "name": tool_name})
+
+			# Notify UI to refresh after state-changing tools.
+			_refresh_ui(tool_name)
+
 		step_completed.emit(current_turn, "Tools executed")
 
 		if tool_calls[-1].get("name", "") == "get_song_state":
@@ -105,3 +123,32 @@ func _run_agent_loop() -> void:
 	state = AgentState.DONE
 	_running = false
 	agent_finished.emit("Reached maximum turns (%d)." % max_turns)
+
+
+## Emit Controller signals to force the main UI to refresh.
+func _refresh_ui(tool_name: String) -> void:
+	match tool_name:
+		"create_song":
+			# Don't emit song_loaded — that triggers Main._edit_current_song()
+			# which reconnects signals and causes errors. Instead, emit individual
+			# change signals that safely refresh the UI panels.
+			Controller.song_bpm_changed.emit()
+			Controller.song_sizes_changed.emit()
+			Controller.song_instrument_changed.emit()
+			Controller.song_pattern_changed.emit()
+		"add_instrument":
+			Controller.song_instrument_created.emit()
+			Controller.song_instrument_changed.emit()
+		"remove_instrument":
+			Controller.song_instrument_changed.emit()
+		"create_pattern":
+			Controller.song_pattern_created.emit()
+			Controller.song_pattern_changed.emit()
+		"add_notes", "remove_notes":
+			Controller.song_pattern_changed.emit()
+		"set_arrangement":
+			Controller.song_sizes_changed.emit()
+		"set_effect":
+			Controller.song_effect_changed.emit()
+		"play_song":
+			pass # Playback handles its own UI.

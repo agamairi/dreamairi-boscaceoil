@@ -18,8 +18,8 @@ func auto_detect_provider() -> LLMProvider:
 	# 1. Ollama (local, no key needed).
 	var ollama := OllamaProvider.new()
 	ollama.base_url = _get_setting("ai_base_url", "http://localhost:11434")
-	if ollama.test_connection():
-		var models := ollama.get_available_models()
+	if await ollama.test_connection():
+		var models := await ollama.get_available_models()
 		if not models.is_empty():
 			ollama.model = _get_setting("ai_model", models[0])
 			active_provider = ollama
@@ -41,7 +41,7 @@ func auto_detect_provider() -> LLMProvider:
 			continue
 		p.api_key = key
 		p.model = _get_setting("ai_model", entry[1])
-		if p.test_connection():
+		if await p.test_connection():
 			active_provider = p
 			connection_status_changed.emit(true, "Connected to %s (%s)" % [p.provider_name, p.model])
 			provider_changed.emit(active_provider)
@@ -78,9 +78,9 @@ func activate_provider(type: String) -> bool:
 	var p := create_provider(type)
 	if p == null:
 		return false
-	if p.test_connection():
+	if await p.test_connection():
 		if p.model.is_empty():
-			var models := p.get_available_models()
+			var models := await p.get_available_models()
 			if not models.is_empty():
 				p.model = models[0]
 		active_provider = p

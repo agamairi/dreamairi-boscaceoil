@@ -29,6 +29,7 @@ func _ready() -> void:
 	_api_key_input.text_changed.connect(_on_api_key_changed)
 	_base_url_input.placeholder_text = "http://localhost:11434"
 	_base_url_input.text_changed.connect(func(t: String) -> void: Controller.settings_manager.set_ai_setting("ai_base_url", t))
+	_model_option.item_selected.connect(_on_model_selected)
 	_test_button.pressed.connect(_on_test)
 	_auto_detect_button.pressed.connect(_on_auto_detect)
 	_max_turns_spin.min_value = 5; _max_turns_spin.max_value = 100; _max_turns_spin.step = 1; _max_turns_spin.value = 20
@@ -53,6 +54,13 @@ func _on_provider_selected(index: int) -> void:
 	_api_key_input.placeholder_text = "API Key required" if index >= 2 else "Not needed for Ollama"
 
 
+func _on_model_selected(index: int) -> void:
+	var model_name: String = _model_option.get_item_text(index)
+	Controller.settings_manager.set_ai_setting("ai_model", model_name)
+	if Controller.llm_manager and Controller.llm_manager.active_provider:
+		Controller.llm_manager.active_provider.model = model_name
+
+
 func _on_api_key_changed(text: String) -> void:
 	match _provider_option.selected:
 		2: Controller.settings_manager.set_ai_setting("ai_api_key_openai", text)
@@ -62,11 +70,11 @@ func _on_api_key_changed(text: String) -> void:
 
 func _on_test() -> void:
 	_set_status("Testing...", Color(0.8, 0.8, 0.3))
-	var type := ["auto", "ollama", "openai", "openrouter", "gemini"][_provider_option.selected]
+	var type: String = ["auto", "ollama", "openai", "openrouter", "gemini"][_provider_option.selected]
 	if type == "auto":
 		_on_auto_detect()
 		return
-	if Controller.llm_manager.activate_provider(type):
+	if await Controller.llm_manager.activate_provider(type):
 		_set_status("Connected!", Color(0.3, 0.9, 0.3))
 		_populate_models()
 	else:
@@ -75,7 +83,7 @@ func _on_test() -> void:
 
 func _on_auto_detect() -> void:
 	_set_status("Auto-detecting...", Color(0.8, 0.8, 0.3))
-	var p := Controller.llm_manager.auto_detect_provider()
+	var p := await Controller.llm_manager.auto_detect_provider()
 	if p:
 		_set_status("Connected to %s (%s)" % [p.provider_name, p.model], Color(0.3, 0.9, 0.3))
 		_populate_models()
@@ -92,7 +100,7 @@ func _populate_models() -> void:
 	_model_option.clear()
 	if not Controller.llm_manager or not Controller.llm_manager.active_provider:
 		return
-	var models := Controller.llm_manager.active_provider.get_available_models()
+	var models := await Controller.llm_manager.active_provider.get_available_models()
 	for m: String in models:
 		_model_option.add_item(m)
 	var current := Controller.llm_manager.active_provider.model

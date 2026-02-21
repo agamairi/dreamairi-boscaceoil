@@ -10,7 +10,7 @@
 [node name="AgentWindow" type="Window"]
 title = "AI Music Agent"
 initial_position = 2
-size = Vector2i(700, 600)
+size = Vector2i(775, 675)
 min_size = Vector2i(500, 400)
 visible = false
 wrap_controls = true

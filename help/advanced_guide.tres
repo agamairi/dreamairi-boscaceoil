@@ -1,7 +1,7 @@
 [gd_resource type="Resource" script_class="HelpGuide" load_steps=20 format=3 uid="uid://dpyar3sq303xm"]
 
-[ext_resource type="Script" path="res://objects/HelpGuide.gd" id="1_6yyxb"]
-[ext_resource type="Script" path="res://objects/HelpGuideStep.gd" id="2_6a2si"]
+[ext_resource type="Script" uid="uid://cfwu181ocyr1w" path="res://objects/HelpGuide.gd" id="1_6yyxb"]
+[ext_resource type="Script" uid="uid://cocu1t6mr5wvv" path="res://objects/HelpGuideStep.gd" id="2_6a2si"]
 [ext_resource type="Texture2D" uid="uid://r26ibp33l6if" path="res://help/advanced_guide_delete_instrument.png" id="3_7bj3b"]
 [ext_resource type="Texture2D" uid="uid://dlmdhoaldml2c" path="res://help/advanced_guide_note_selection.png" id="3_8j5sp"]
 [ext_resource type="Texture2D" uid="uid://dotqpsqiueyqi" path="res://help/advanced_guide_rec_filter.png" id="4_f2mo2"]

@@ -87,9 +87,11 @@ func _add_instrument(args: Dictionary) -> Dictionary:
 		return {"error": "No song loaded"}
 	if song.instruments.size() >= Song.MAX_INSTRUMENT_COUNT:
 		return {"error": "Max instruments reached"}
-	var voice_data: VoiceManager.VoiceData = Controller.voice_manager.get_voice_data(args.get("category", ""), args.get("name", ""))
+	var cat: String = args.get("category", "")
+	var req_name: String = args.get("name", "")
+	var voice_data: VoiceManager.VoiceData = _find_voice(cat, req_name)
 	if voice_data == null:
-		return {"error": "Instrument not found: %s / %s" % [args.get("category", ""), args.get("name", "")]}
+		return {"error": "Instrument not found: %s / %s. Use list_instruments to see available names." % [cat, req_name]}
 	var inst: Instrument
 	if voice_data.category == "DRUMKIT":
 		inst = DrumkitInstrument.new(voice_data)
@@ -99,7 +101,45 @@ func _add_instrument(args: Dictionary) -> Dictionary:
 	var idx := song.instruments.size() - 1
 	Controller.edit_instrument(idx)
 	song.mark_dirty()
-	return {"success": true, "instrument_index": idx, "message": "Added '%s' at index %d" % [args.get("name", ""), idx]}
+	return {"success": true, "instrument_index": idx, "message": "Added '%s' (matched '%s') at index %d" % [req_name, voice_data.name, idx]}
+
+
+## Fuzzy instrument lookup: exact match → substring match → first in category.
+func _find_voice(category: String, name: String) -> VoiceManager.VoiceData:
+	# 1. Exact match.
+	var exact := Controller.voice_manager.get_voice_data(category, name)
+	if exact:
+		return exact
+
+	# 2. Case-insensitive substring match across all voices in category.
+	var name_lower := name.to_lower()
+	var cats := Controller.voice_manager.get_categories()
+	var search_cats: Array[String] = []
+	for c: String in cats:
+		if category.is_empty() or c.to_lower() == category.to_lower():
+			search_cats.push_back(c)
+
+	var best_match: VoiceManager.VoiceData = null
+	var first_in_cat: VoiceManager.VoiceData = null
+	for c: String in search_cats:
+		var subs := Controller.voice_manager.get_sub_categories(c)
+		for sub: VoiceManager.SubCategory in subs:
+			for voice: VoiceManager.VoiceData in sub.voices:
+				if first_in_cat == null:
+					first_in_cat = voice
+				if voice.name.to_lower().contains(name_lower) or name_lower.contains(voice.name.to_lower()):
+					best_match = voice
+					break
+			if best_match:
+				break
+		if best_match:
+			break
+
+	if best_match:
+		return best_match
+
+	# 3. Fallback: first instrument in the category.
+	return first_in_cat
 
 
 func _remove_instrument(args: Dictionary) -> Dictionary:
@@ -146,12 +186,13 @@ func _add_notes(args: Dictionary) -> Dictionary:
 	var pattern := song.patterns[pat_idx]
 	var added := 0
 	for nd: Variant in args.get("notes", []):
-		if nd is Dictionary:
-			var d: Dictionary = nd
-			var pos: int = d.get("position", 0)
-			if pos >= 0 and pos < song.pattern_size and d.get("note", -1) >= 0:
-				pattern.add_note(d["note"], pos, maxi(d.get("length", 1), 1))
-				added += 1
+		var d: Dictionary = _coerce_note_dict(nd)
+		if d.is_empty():
+			continue
+		var pos: int = d.get("position", 0)
+		if pos >= 0 and pos < song.pattern_size and d.get("note", -1) >= 0:
+			pattern.add_note(d["note"], pos, maxi(d.get("length", 1), 1))
+			added += 1
 	song.mark_dirty()
 	return {"success": true, "added_count": added, "message": "Added %d notes to pattern %d" % [added, pat_idx]}
 
@@ -166,10 +207,11 @@ func _remove_notes(args: Dictionary) -> Dictionary:
 	var pattern := song.patterns[pat_idx]
 	var removed := 0
 	for nd: Variant in args.get("notes", []):
-		if nd is Dictionary:
-			var d: Dictionary = nd
-			pattern.remove_note(d.get("note", 0), d.get("position", 0))
-			removed += 1
+		var d: Dictionary = _coerce_note_dict(nd)
+		if d.is_empty():
+			continue
+		pattern.remove_note(d.get("note", 0), d.get("position", 0))
+		removed += 1
 	song.mark_dirty()
 	return {"success": true, "removed_count": removed, "message": "Removed %d notes from pattern %d" % [removed, pat_idx]}
 
@@ -180,17 +222,18 @@ func _set_arrangement(args: Dictionary) -> Dictionary:
 		return {"error": "No song loaded"}
 	var placed := 0
 	for e: Variant in args.get("entries", []):
-		if e is Dictionary:
-			var d: Dictionary = e
-			var bar: int = d.get("bar", 0)
-			var ch: int = d.get("channel", 0)
-			var pi: int = d.get("pattern_index", -1)
-			if bar >= 0 and bar < Arrangement.BAR_NUMBER and ch >= 0 and ch < Arrangement.CHANNEL_NUMBER:
-				if pi < 0:
-					song.arrangement.clear_pattern(bar, ch)
-				else:
-					song.arrangement.set_pattern(bar, ch, pi)
-				placed += 1
+		var d: Dictionary = _coerce_entry_dict(e)
+		if d.is_empty():
+			continue
+		var bar: int = d.get("bar", 0)
+		var ch: int = d.get("channel", 0)
+		var pi: int = d.get("pattern_index", -1)
+		if bar >= 0 and bar < Arrangement.BAR_NUMBER and ch >= 0 and ch < Arrangement.CHANNEL_NUMBER:
+			if pi < 0:
+				song.arrangement.clear_pattern(bar, ch)
+			else:
+				song.arrangement.set_pattern(bar, ch, pi)
+			placed += 1
 	song.mark_dirty()
 	return {"success": true, "placed_count": placed, "message": "Set %d arrangement entries" % placed}
 
@@ -233,7 +276,7 @@ func _get_song_state(_args: Dictionary) -> Dictionary:
 			if pi >= 0:
 				arr.push_back({"bar": bar, "channel": ch, "pattern_index": pi})
 
-	return {"bpm": song.bpm, "pattern_size": song.pattern_size, "instruments": insts, "patterns": pats, "arrangement": arr, "global_effect": song.global_effect, "global_effect_power": song.global_effect_power}
+	return {"success": true, "message": "%d instruments, %d patterns, %d arrangement entries" % [insts.size(), pats.size(), arr.size()], "bpm": song.bpm, "pattern_size": song.pattern_size, "instruments": insts, "patterns": pats, "arrangement": arr, "global_effect": song.global_effect, "global_effect_power": song.global_effect_power}
 
 
 func _play_song(args: Dictionary) -> Dictionary:
@@ -265,4 +308,32 @@ func _list_instruments(args: Dictionary) -> Dictionary:
 		for sub: VoiceManager.SubCategory in subs:
 			for voice: VoiceManager.VoiceData in sub.voices:
 				out.push_back({"category": cat, "name": voice.name, "index": voice.index})
-	return {"instrument_count": out.size(), "instruments": out, "categories": cats if filter.is_empty() else PackedStringArray([filter])}
+	var cat_list: Array = []
+	for c: String in (cats if filter.is_empty() else PackedStringArray([filter])):
+		cat_list.push_back(c)
+	return {"success": true, "message": "Found %d instruments" % out.size(), "instrument_count": out.size(), "instruments": out, "categories": cat_list}
+
+
+## Coerce a note entry from either a Dictionary or Array [note, position, length?] into a Dictionary.
+func _coerce_note_dict(v: Variant) -> Dictionary:
+	if v is Dictionary:
+		return v as Dictionary
+	if v is Array:
+		var a: Array = v as Array
+		if a.size() >= 2:
+			var d := {"note": int(a[0]), "position": int(a[1])}
+			if a.size() >= 3:
+				d["length"] = int(a[2])
+			return d
+	return {}
+
+
+## Coerce an arrangement entry from either a Dictionary or Array [bar, channel, pattern_index] into a Dictionary.
+func _coerce_entry_dict(v: Variant) -> Dictionary:
+	if v is Dictionary:
+		return v as Dictionary
+	if v is Array:
+		var a: Array = v as Array
+		if a.size() >= 3:
+			return {"bar": int(a[0]), "channel": int(a[1]), "pattern_index": int(a[2])}
+	return {}

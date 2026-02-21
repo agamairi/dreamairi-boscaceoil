@@ -1,7 +1,7 @@
 [gd_resource type="Resource" script_class="HelpGuide" load_steps=29 format=3 uid="uid://c8snyulwofxh0"]
 
-[ext_resource type="Script" path="res://objects/HelpGuide.gd" id="1_bxt1b"]
-[ext_resource type="Script" path="res://objects/HelpGuideStep.gd" id="2_dumha"]
+[ext_resource type="Script" uid="uid://cfwu181ocyr1w" path="res://objects/HelpGuide.gd" id="1_bxt1b"]
+[ext_resource type="Script" uid="uid://cocu1t6mr5wvv" path="res://objects/HelpGuideStep.gd" id="2_dumha"]
 [ext_resource type="Texture2D" uid="uid://dvrr63bss01ek" path="res://help/basic_guide_longnote.png" id="3_5vxqq"]
 [ext_resource type="Texture2D" uid="uid://bg8islw0t6v7u" path="res://help/basic_guide_pattern_drag.png" id="4_d3ksy"]
 [ext_resource type="Texture2D" uid="uid://sut1q8rtgo5d" path="res://help/basic_guide_pattern_paint.png" id="5_6t0bx"]
