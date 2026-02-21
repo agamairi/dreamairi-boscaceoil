@@ -1,0 +1,273 @@
+[gd_scene load_steps=7 format=3]
+
+[ext_resource type="Script" path="res://gui/views/agent/AgentWindow.gd" id="1_agent"]
+[ext_resource type="Script" path="res://gui/views/agent/ChatPanel.gd" id="2_chat"]
+[ext_resource type="Script" path="res://gui/views/agent/StatusPanel.gd" id="3_status"]
+[ext_resource type="Script" path="res://gui/views/agent/LogsPanel.gd" id="4_logs"]
+[ext_resource type="Script" path="res://gui/views/agent/ToolsPanel.gd" id="5_tools"]
+[ext_resource type="Script" path="res://gui/views/agent/AISettingsView.gd" id="6_settings"]
+
+[node name="AgentWindow" type="Window"]
+title = "AI Music Agent"
+initial_position = 2
+size = Vector2i(700, 600)
+min_size = Vector2i(500, 400)
+visible = false
+wrap_controls = true
+script = ExtResource("1_agent")
+
+[node name="Main" type="MarginContainer" parent="."]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/margin_left = 4
+theme_override_constants/margin_top = 4
+theme_override_constants/margin_right = 4
+theme_override_constants/margin_bottom = 4
+
+[node name="HSplit" type="HSplitContainer" parent="Main"]
+layout_mode = 2
+split_offset = 420
+
+[node name="ChatPanel" type="VBoxContainer" parent="Main/HSplit"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_stretch_ratio = 2.5
+script = ExtResource("2_chat")
+
+[node name="MessageScroll" type="ScrollContainer" parent="Main/HSplit/ChatPanel"]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="MessageDisplay" type="RichTextLabel" parent="Main/HSplit/ChatPanel/MessageScroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+bbcode_enabled = true
+scroll_following = true
+selection_enabled = true
+
+[node name="InputBar" type="HBoxContainer" parent="Main/HSplit/ChatPanel"]
+custom_minimum_size = Vector2(0, 32)
+layout_mode = 2
+
+[node name="InputField" type="LineEdit" parent="Main/HSplit/ChatPanel/InputBar"]
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "Type a message..."
+
+[node name="SendButton" type="Button" parent="Main/HSplit/ChatPanel/InputBar"]
+custom_minimum_size = Vector2(60, 0)
+layout_mode = 2
+text = "Send"
+
+[node name="ClearButton" type="Button" parent="Main/HSplit/ChatPanel/InputBar"]
+custom_minimum_size = Vector2(50, 0)
+layout_mode = 2
+text = "Clear"
+
+[node name="RightSide" type="VSplitContainer" parent="Main/HSplit"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="StatusPanel" type="VBoxContainer" parent="Main/HSplit/RightSide"]
+custom_minimum_size = Vector2(0, 140)
+layout_mode = 2
+script = ExtResource("3_status")
+
+[node name="Header" type="Label" parent="Main/HSplit/RightSide/StatusPanel"]
+layout_mode = 2
+text = "STATUS"
+horizontal_alignment = 1
+
+[node name="HSeparator" type="HSeparator" parent="Main/HSplit/RightSide/StatusPanel"]
+layout_mode = 2
+
+[node name="StateRow" type="HBoxContainer" parent="Main/HSplit/RightSide/StatusPanel"]
+layout_mode = 2
+
+[node name="StateLabel" type="Label" parent="Main/HSplit/RightSide/StatusPanel/StateRow"]
+layout_mode = 2
+text = "State:"
+
+[node name="StateValue" type="Label" parent="Main/HSplit/RightSide/StatusPanel/StateRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Idle"
+
+[node name="ProviderRow" type="HBoxContainer" parent="Main/HSplit/RightSide/StatusPanel"]
+layout_mode = 2
+
+[node name="ProviderLabel" type="Label" parent="Main/HSplit/RightSide/StatusPanel/ProviderRow"]
+layout_mode = 2
+text = "Provider:"
+
+[node name="ProviderValue" type="Label" parent="Main/HSplit/RightSide/StatusPanel/ProviderRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Not connected"
+
+[node name="StepRow" type="HBoxContainer" parent="Main/HSplit/RightSide/StatusPanel"]
+layout_mode = 2
+
+[node name="StepLabel" type="Label" parent="Main/HSplit/RightSide/StatusPanel/StepRow"]
+layout_mode = 2
+text = "Steps:"
+
+[node name="StepValue" type="Label" parent="Main/HSplit/RightSide/StatusPanel/StepRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "0 / 20"
+
+[node name="Controls" type="HBoxContainer" parent="Main/HSplit/RightSide/StatusPanel"]
+layout_mode = 2
+
+[node name="PlayButton" type="Button" parent="Main/HSplit/RightSide/StatusPanel/Controls"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Play"
+
+[node name="StopButton" type="Button" parent="Main/HSplit/RightSide/StatusPanel/Controls"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Stop"
+
+[node name="Tabs" type="TabContainer" parent="Main/HSplit/RightSide"]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="Logs" type="VBoxContainer" parent="Main/HSplit/RightSide/Tabs"]
+layout_mode = 2
+script = ExtResource("4_logs")
+
+[node name="LogScroll" type="ScrollContainer" parent="Main/HSplit/RightSide/Tabs/Logs"]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="LogDisplay" type="RichTextLabel" parent="Main/HSplit/RightSide/Tabs/Logs/LogScroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+bbcode_enabled = true
+scroll_following = true
+selection_enabled = true
+
+[node name="Tools" type="VBoxContainer" parent="Main/HSplit/RightSide/Tabs"]
+layout_mode = 2
+script = ExtResource("5_tools")
+
+[node name="ToolsScroll" type="ScrollContainer" parent="Main/HSplit/RightSide/Tabs/Tools"]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="ToolsList" type="RichTextLabel" parent="Main/HSplit/RightSide/Tabs/Tools/ToolsScroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+bbcode_enabled = true
+selection_enabled = true
+
+[node name="Settings" type="VBoxContainer" parent="Main/HSplit/RightSide/Tabs"]
+layout_mode = 2
+script = ExtResource("6_settings")
+
+[node name="ProviderRow" type="HBoxContainer" parent="Main/HSplit/RightSide/Tabs/Settings"]
+layout_mode = 2
+
+[node name="Label" type="Label" parent="Main/HSplit/RightSide/Tabs/Settings/ProviderRow"]
+layout_mode = 2
+text = "Provider:"
+
+[node name="ProviderOption" type="OptionButton" parent="Main/HSplit/RightSide/Tabs/Settings/ProviderRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="ApiKeyRow" type="HBoxContainer" parent="Main/HSplit/RightSide/Tabs/Settings"]
+layout_mode = 2
+
+[node name="Label" type="Label" parent="Main/HSplit/RightSide/Tabs/Settings/ApiKeyRow"]
+layout_mode = 2
+text = "API Key:"
+
+[node name="ApiKeyInput" type="LineEdit" parent="Main/HSplit/RightSide/Tabs/Settings/ApiKeyRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+secret = true
+
+[node name="BaseUrlRow" type="HBoxContainer" parent="Main/HSplit/RightSide/Tabs/Settings"]
+layout_mode = 2
+
+[node name="Label" type="Label" parent="Main/HSplit/RightSide/Tabs/Settings/BaseUrlRow"]
+layout_mode = 2
+text = "Base URL:"
+
+[node name="BaseUrlInput" type="LineEdit" parent="Main/HSplit/RightSide/Tabs/Settings/BaseUrlRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="ModelRow" type="HBoxContainer" parent="Main/HSplit/RightSide/Tabs/Settings"]
+layout_mode = 2
+
+[node name="Label" type="Label" parent="Main/HSplit/RightSide/Tabs/Settings/ModelRow"]
+layout_mode = 2
+text = "Model:"
+
+[node name="ModelOption" type="OptionButton" parent="Main/HSplit/RightSide/Tabs/Settings/ModelRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+
+[node name="ButtonRow" type="HBoxContainer" parent="Main/HSplit/RightSide/Tabs/Settings"]
+layout_mode = 2
+
+[node name="TestButton" type="Button" parent="Main/HSplit/RightSide/Tabs/Settings/ButtonRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Test Connection"
+
+[node name="AutoDetectButton" type="Button" parent="Main/HSplit/RightSide/Tabs/Settings/ButtonRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Auto Detect"
+
+[node name="StatusRow" type="HBoxContainer" parent="Main/HSplit/RightSide/Tabs/Settings"]
+layout_mode = 2
+
+[node name="StatusLabel" type="Label" parent="Main/HSplit/RightSide/Tabs/Settings/StatusRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Ready"
+
+[node name="TuningRow" type="HBoxContainer" parent="Main/HSplit/RightSide/Tabs/Settings"]
+layout_mode = 2
+
+[node name="Label" type="Label" parent="Main/HSplit/RightSide/Tabs/Settings/TuningRow"]
+layout_mode = 2
+text = "Max Turns:"
+
+[node name="MaxTurnsSpin" type="SpinBox" parent="Main/HSplit/RightSide/Tabs/Settings/TuningRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+min_value = 5.0
+max_value = 100.0
+value = 20.0
+
+[node name="TempRow" type="HBoxContainer" parent="Main/HSplit/RightSide/Tabs/Settings"]
+layout_mode = 2
+
+[node name="Label" type="Label" parent="Main/HSplit/RightSide/Tabs/Settings/TempRow"]
+layout_mode = 2
+text = "Temperature:"
+
+[node name="TemperatureSlider" type="HSlider" parent="Main/HSplit/RightSide/Tabs/Settings/TempRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+max_value = 1.0
+step = 0.05
+value = 0.7
+
+[node name="TemperatureValue" type="Label" parent="Main/HSplit/RightSide/Tabs/Settings/TempRow"]
+custom_minimum_size = Vector2(40, 0)
+layout_mode = 2
+text = "0.70"

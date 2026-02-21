@@ -1,4 +1,4 @@
-[gd_scene load_steps=9 format=3 uid="uid://cf3nug1sfh1ix"]
+[gd_scene load_steps=10 format=3 uid="uid://cf3nug1sfh1ix"]
 
 [ext_resource type="Script" path="res://Main.gd" id="1_63yj5"]
 [ext_resource type="Script" path="res://gui/widgets/FillerControl.gd" id="2_kg520"]
@@ -8,6 +8,7 @@
 [ext_resource type="Script" path="res://globals/PopupManager.gd" id="4_kqdnh"]
 [ext_resource type="PackedScene" uid="uid://dxtku0ujhowt5" path="res://gui/widgets/ToastMessage.tscn" id="5_carau"]
 [ext_resource type="Script" path="res://gui/widgets/HighlightManager.gd" id="6_gf5v8"]
+[ext_resource type="PackedScene" path="res://gui/views/agent/AgentWindow.tscn" id="7_agent"]
 
 [node name="Main" type="MarginContainer"]
 anchors_preset = 15
@@ -75,3 +76,5 @@ grow_vertical = 2
 [node name="SaveTimer" type="Timer" parent="."]
 unique_name_in_owner = true
 one_shot = true
+
+[node name="AgentWindow" parent="." instance=ExtResource("7_agent")]

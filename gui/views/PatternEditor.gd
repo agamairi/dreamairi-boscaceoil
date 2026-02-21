@@ -17,6 +17,7 @@ var current_pattern: Pattern = null
 @onready var _record_instrument_label: Label = %RecordInstrumentLabel
 @onready var _note_shift_up: Button = %NoteShiftUp
 @onready var _note_shift_down: Button = %NoteShiftDown
+@onready var _ai_button: Button = %AIButton
 
 
 func _ready() -> void:
@@ -30,6 +31,7 @@ func _ready() -> void:
 	_record_instrument.toggled.connect(_toggle_record_instrument)
 	_note_shift_up.pressed.connect(_shift_notes.bind(1))
 	_note_shift_down.pressed.connect(_shift_notes.bind(-1))
+	_ai_button.pressed.connect(_toggle_agent_window)
 	
 	_edit_current_pattern()
 	
@@ -324,3 +326,9 @@ func _shift_notes(offset: int) -> void:
 	)
 	
 	Controller.state_manager.commit_state_change(pattern_state)
+
+
+func _toggle_agent_window() -> void:
+	var main_node := get_tree().current_scene
+	if main_node and main_node.has_method("_toggle_agent_window"):
+		main_node._toggle_agent_window()

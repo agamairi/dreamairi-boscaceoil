@@ -121,3 +121,10 @@ custom_minimum_size = Vector2(90, 0)
 layout_mode = 2
 direction = 2
 placeholder_text = "K"
+
+[node name="AIButton" type="Button" parent="PatternSettings/PropertyBar"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(40, 0)
+layout_mode = 2
+focus_mode = 0
+text = "AI"

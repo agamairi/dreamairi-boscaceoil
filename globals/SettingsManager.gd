@@ -280,3 +280,17 @@ func get_last_opened_folder() -> String:
 func set_last_opened_folder(value: String) -> void:
 	_last_opened_folder = value
 	save_settings()
+
+
+# Settings: AI.
+
+func get_ai_setting(key: String, default_value: String = "") -> String:
+	if _stored_file:
+		return str(_stored_file.get_value("ai", key, default_value))
+	return default_value
+
+
+func set_ai_setting(key: String, value: String) -> void:
+	if _stored_file:
+		_stored_file.set_value("ai", key, value)
+		save_settings()

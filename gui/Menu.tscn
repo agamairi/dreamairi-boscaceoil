@@ -78,6 +78,14 @@ size_flags_horizontal = 3
 size_flags_stretch_ratio = 2.0
 theme_type_variation = &"NavigationPanel"
 
+[node name="AIToggle" type="Button" parent="Navigation"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(52, 20)
+layout_mode = 2
+focus_mode = 0
+theme_type_variation = &"FullscreenButton"
+text = "AI"
+
 [node name="FullscreenToggle" type="Button" parent="Navigation"]
 unique_name_in_owner = true
 custom_minimum_size = Vector2(52, 20)

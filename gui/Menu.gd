@@ -19,6 +19,7 @@ enum NavigationTarget {
 var _current_tab: int = 0
 
 @onready var _fullscreen_toggle: Button = %FullscreenToggle
+@onready var _ai_toggle: Button = %AIToggle
 @onready var _contents_root: Control = $Contents
 @onready var _tab_buttons: ButtonGroup = load("res://gui/theme/navigation_buttons.tres")
 
@@ -55,6 +56,7 @@ func _ready() -> void:
 		Controller.help_manager.reference_node(HelpManager.StepNodeRef.NAVIGATION_INSTRUMENT, _instrument_tab_button.get_global_rect)
 		
 		_fullscreen_toggle.pressed.connect(Controller.settings_manager.toggle_fullscreen)
+		_ai_toggle.pressed.connect(_toggle_agent_window)
 		get_window().size_changed.connect(_update_fullscreen_button)
 		
 		Controller.navigation_requested.connect(_navigate)
@@ -113,3 +115,9 @@ func _update_fullscreen_button() -> void:
 		_fullscreen_toggle.icon = get_theme_icon("fullscreen_off", "Menu")
 	else:
 		_fullscreen_toggle.icon = get_theme_icon("fullscreen_on", "Menu")
+
+
+func _toggle_agent_window() -> void:
+	var main_node := get_tree().current_scene
+	if main_node and main_node.has_method("_toggle_agent_window"):
+		main_node._toggle_agent_window()

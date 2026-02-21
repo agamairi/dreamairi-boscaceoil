@@ -11,6 +11,7 @@ var _default_window_title: String = ""
 @onready var _pattern_editor: Control = %PatternEditor
 @onready var _locked_indicator: Control = %LockedIndicator
 @onready var _highlight_manager: CanvasLayer = %HighlightManager
+@onready var _agent_window: Window = $AgentWindow
 
 
 func _enter_tree() -> void:
@@ -39,6 +40,17 @@ func _ready() -> void:
 		
 		Controller.help_manager.highlight_requested.connect(_set_highlighted_node)
 		Controller.help_manager.highlight_cleared.connect(_clear_highlighted_node)
+
+
+func _shortcut_input(event: InputEvent) -> void:
+	if event.is_action_pressed("bosca_toggle_ai", false, true):
+		_toggle_agent_window()
+		get_viewport().set_input_as_handled()
+
+
+func _toggle_agent_window() -> void:
+	if _agent_window:
+		_agent_window.toggle()
 
 
 # Window decorations.

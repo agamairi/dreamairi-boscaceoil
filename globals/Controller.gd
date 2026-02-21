@@ -48,6 +48,8 @@ var voice_manager: VoiceManager = null
 var music_player: MusicPlayer = null
 var io_manager: IOManager = null
 var help_manager: HelpManager = null
+var llm_manager: LLMManager = null
+var agent_executor: AgentExecutor = null
 
 ## Current edited song.
 var current_song: Song = null
@@ -85,6 +87,8 @@ func _init() -> void:
 	music_player = MusicPlayer.new()
 	io_manager = IOManager.new()
 	help_manager = HelpManager.new()
+	llm_manager = LLMManager.new()
+	agent_executor = AgentExecutor.new()
 	
 	settings_manager.buffer_size_changed.connect(music_player.update_driver_buffer)
 	settings_manager.load_settings()
