@@ -1,6 +1,6 @@
 [gd_scene load_steps=2 format=3 uid="uid://dxtku0ujhowt5"]
 
-[ext_resource type="Script" path="res://gui/widgets/ToastMessage.gd" id="1_jh7g8"]
+[ext_resource type="Script" uid="uid://bo4gjfdwj2pim" path="res://gui/widgets/ToastMessage.gd" id="1_jh7g8"]
 
 [node name="ToastMessage" type="Control"]
 layout_mode = 3

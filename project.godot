@@ -10,18 +10,17 @@ config_version=5
 
 [application]
 
-config/name="Bosca Ceoil: The Blue Album"
+config/name="Bosca Ceoil: DreamAiri"
 config/description="A simple music making app."
-config/version="3.2"
+config/version="1.0"
 run/main_scene="res://Main.tscn"
 config/use_custom_user_dir=true
 config/custom_user_dir_name="boscaceoil-blue"
 config/features=PackedStringArray("4.4", "GL Compatibility")
 run/max_fps=200
 boot_splash/bg_color=Color(0.0593993, 0.0688814, 0.10927, 1)
+boot_splash/show_image=false
 boot_splash/fullsize=false
-boot_splash/image="res://dist/logo-full.png"
-config/icon="res://icon.png"
 config/windows_native_icon="res://dist/windows-icon.ico"
 config/version_flair="dev"
 
