@@ -7,6 +7,8 @@
 ## Defines and executes all music tools available to the AI agent.
 class_name MusicTools extends RefCounted
 
+static var output_dir: String = ""
+
 var tool_definitions: Array = []
 var call_log: Array[Dictionary] = []
 
@@ -60,6 +62,9 @@ func execute(tool_name: String, arguments: Dictionary) -> Dictionary:
 		"play_song": result = _play_song(arguments)
 		"export_song": result = _export_song(arguments)
 		"list_instruments": result = _list_instruments(arguments)
+		"snapshot": result = _snapshot(arguments)
+		"load_song": result = _load_song(arguments)
+		"save_song": result = _save_song(arguments)
 		_: result = {"error": "Unknown tool: %s" % tool_name}
 
 	call_log.push_back({"tool": tool_name, "arguments": arguments, "result": result, "elapsed_ms": Time.get_ticks_msec() - t0, "timestamp": Time.get_datetime_string_from_system()})
@@ -184,8 +189,11 @@ func _add_notes(args: Dictionary) -> Dictionary:
 	if pat_idx < 0 or pat_idx >= song.patterns.size():
 		return {"error": "Invalid pattern index"}
 	var pattern := song.patterns[pat_idx]
+	var notes_array: Array = args.get("notes", [])
+	if notes_array.size() > 512:
+		return {"error": "Too many notes (maximum 512 per call, got %d)" % notes_array.size()}
 	var added := 0
-	for nd: Variant in args.get("notes", []):
+	for nd: Variant in notes_array:
 		var d: Dictionary = _coerce_note_dict(nd)
 		if d.is_empty():
 			continue
@@ -205,8 +213,11 @@ func _remove_notes(args: Dictionary) -> Dictionary:
 	if pat_idx < 0 or pat_idx >= song.patterns.size():
 		return {"error": "Invalid pattern index"}
 	var pattern := song.patterns[pat_idx]
+	var notes_array: Array = args.get("notes", [])
+	if notes_array.size() > 512:
+		return {"error": "Too many notes (maximum 512 per call, got %d)" % notes_array.size()}
 	var removed := 0
-	for nd: Variant in args.get("notes", []):
+	for nd: Variant in notes_array:
 		var d: Dictionary = _coerce_note_dict(nd)
 		if d.is_empty():
 			continue
@@ -291,10 +302,113 @@ func _play_song(args: Dictionary) -> Dictionary:
 
 
 func _export_song(args: Dictionary) -> Dictionary:
+	if output_dir.is_empty():
+		return {"error": "remote control not active"}
 	var song := Controller.current_song
 	if not song:
 		return {"error": "No song loaded"}
-	return {"success": true, "message": "Export requested as %s. Use File > Export." % args.get("format", "wav").to_upper()}
+	
+	var format: String = str(args.get("format", "")).to_lower()
+	var name: String = str(args.get("name", ""))
+	if not _is_valid_filename(name):
+		return {"error": "Invalid name: %s" % name}
+	
+	if format == "midi" or format == "mid":
+		var file_name: String = name
+		if not file_name.ends_with(".mid"):
+			file_name += ".mid"
+		var target_path: String = output_dir.path_join(file_name)
+		
+		var export_config := ExportMasterPopup.ExportConfig.new()
+		export_config.type = ExportMasterPopup.ExportType.EXPORT_MIDI
+		export_config.loop_start = song.arrangement.loop_start
+		export_config.loop_end = song.arrangement.loop_end
+		
+		var ok: bool = MidiExporter.save(song, target_path, export_config)
+		if not ok:
+			return {"error": "Failed to export MIDI to %s" % target_path}
+		
+		var file_bytes: PackedByteArray = FileAccess.get_file_as_bytes(target_path)
+		var sha256: String = FileAccess.get_sha256(target_path)
+		return {
+			"path": target_path,
+			"bytes": file_bytes.size(),
+			"sha256": sha256,
+		}
+	elif format == "wav":
+		return {"error": "WAV export through remote control is not implemented; use File > Export > WAV in the app"}
+	else:
+		return {"error": "Unsupported export format: %s (supported: midi)" % format}
+
+
+func _snapshot(_args: Dictionary) -> Dictionary:
+	var song := Controller.current_song
+	if not song:
+		return {"error": "No song loaded"}
+	
+	var state: Dictionary = _get_song_state({})
+	var ceol_text: String = SongSaver.serialize(song)
+	var midi_b64: String = ""
+	var midi_bytes: PackedByteArray = MidiExporter.get_data(song)
+	if midi_bytes.size() > 0:
+		midi_b64 = Marshalls.raw_to_base64(midi_bytes)
+	
+	return {
+		"state": state,
+		"ceol": ceol_text,
+		"midi_b64": midi_b64,
+	}
+
+
+func _load_song(args: Dictionary) -> Dictionary:
+	var ceol: String = str(args.get("ceol", ""))
+	if ceol.is_empty():
+		return {"error": "Missing or empty ceol content"}
+	
+	var song: Song = SongLoader.load_from_string(ceol)
+	if not song or not song.is_valid_song():
+		return {"error": "Failed to parse ceol song"}
+	
+	Controller.music_player.stop_playback()
+	Controller.set_current_song(song)
+	Controller.update_status("SONG LOADED", Controller.StatusLevel.SUCCESS)
+	return {"success": true, "message": "Song loaded successfully"}
+
+
+func _save_song(args: Dictionary) -> Dictionary:
+	if output_dir.is_empty():
+		return {"error": "remote control not active"}
+	var song := Controller.current_song
+	if not song:
+		return {"error": "No song loaded"}
+	
+	var name: String = str(args.get("name", ""))
+	if not _is_valid_filename(name):
+		return {"error": "Invalid name: %s" % name}
+	
+	var file_name: String = name
+	if not file_name.ends_with(".ceol"):
+		file_name += ".ceol"
+	
+	var target_path: String = output_dir.path_join(file_name)
+	var ok: bool = SongSaver.save(song, target_path)
+	if not ok:
+		return {"error": "Failed to save song to %s" % target_path}
+	
+	Controller.mark_song_saved()
+	var file_bytes: PackedByteArray = FileAccess.get_file_as_bytes(target_path)
+	return {
+		"path": target_path,
+		"bytes": file_bytes.size(),
+	}
+
+
+static func _is_valid_filename(name: String) -> bool:
+	if name.is_empty() or name.begins_with("."):
+		return false
+	var regex := RegEx.new()
+	regex.compile("^[A-Za-z0-9._-]{1,64}$")
+	return regex.search(name) != null
 
 
 func _list_instruments(args: Dictionary) -> Dictionary:

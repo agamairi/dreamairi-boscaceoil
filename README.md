@@ -67,6 +67,11 @@ Auto-detection finds whatever's running — or configure manually in the Setting
 5. Watch the agent create instruments, patterns, and arrangements in real-time
 
 
+## Remote control (DreamAiri plugin)
+
+Bosca Ceoil can be launched as a remote-controlled sub-app by the DreamAiri Godot editor plugin using `--dreamairi-handoff <path>`. An embedded loopback TCP server (`ai/remote_control.gd`) binds to `127.0.0.1` and speaks length-prefixed framed JSON, allowing the plugin and the user to drive the live composition simultaneously. Remote export supports MIDI only; WAV rendering through remote control is a known limitation and WAV export is done by the user via **File > Export > WAV** in the app. See [ai/REMOTE_CONTROL.md](ai/REMOTE_CONTROL.md) for launch parameters, protocol operations, and security details.
+
+
 ## Architecture
 
 ```

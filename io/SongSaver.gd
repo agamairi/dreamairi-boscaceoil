@@ -7,6 +7,12 @@
 class_name SongSaver extends RefCounted
 
 
+static func serialize(song: Song) -> String:
+	var writer := SongFileWriter.new(song.filename if song else "")
+	_write(writer, song)
+	return writer.get_file_string()
+
+
 static func save(song: Song, path: String) -> bool:
 	if path.get_extension() != Song.FILE_EXTENSION:
 		printerr("SongSaver: The song file must have a .%s extension." % [ Song.FILE_EXTENSION ])
@@ -18,12 +24,11 @@ static func save(song: Song, path: String) -> bool:
 		printerr("SongSaver: Failed to open the file at '%s' for writing (code %d)." % [ path, error ])
 		return false
 	
-	var writer := SongFileWriter.new(path)
-	_write(writer, song)
+	var file_contents := serialize(song)
 	
 	# Try to write the file with the new contents.
 	
-	error = file.write_text_contents(writer.get_file_string())
+	error = file.write_text_contents(file_contents)
 	if error != OK:
 		printerr("SongSaver: Failed to write to the file at '%s' (code %d)." % [ path, error ])
 		return false

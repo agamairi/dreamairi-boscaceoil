@@ -6,7 +6,10 @@
 
 extends MarginContainer
 
+const REMOTE_CONTROL_SCRIPT := preload("res://ai/remote_control.gd")
+
 var _default_window_title: String = ""
+var _remote_control: RemoteControl = null
 
 @onready var _pattern_editor: Control = %PatternEditor
 @onready var _locked_indicator: Control = %LockedIndicator
@@ -34,12 +37,111 @@ func _ready() -> void:
 		
 		Controller.song_loaded.connect(_edit_current_song)
 		Controller.song_saved.connect(_update_window_title)
+		Controller.song_saved.connect(_on_song_saved_event)
 		
 		Controller.controls_locked.connect(_show_locked_indicator)
 		Controller.controls_unlocked.connect(_hide_locked_indicator)
 		
 		Controller.help_manager.highlight_requested.connect(_set_highlighted_node)
 		Controller.help_manager.highlight_cleared.connect(_clear_highlighted_node)
+		
+		_init_remote_control()
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_PREDELETE:
+		if _remote_control:
+			_remote_control.send_event("closing")
+
+
+func _init_remote_control() -> void:
+	var handoff_path := ""
+	var user_args := OS.get_cmdline_user_args()
+	for i in user_args.size():
+		if user_args[i] == "--dreamairi-handoff" and i + 1 < user_args.size():
+			handoff_path = user_args[i + 1]
+			break
+	if handoff_path.is_empty():
+		var cmd_args := OS.get_cmdline_args()
+		for i in cmd_args.size():
+			if cmd_args[i] == "--dreamairi-handoff" and i + 1 < cmd_args.size():
+				handoff_path = cmd_args[i + 1]
+				break
+	
+	if handoff_path.is_empty():
+		return
+	
+	if not FileAccess.file_exists(handoff_path):
+		printerr("Main: handoff file does not exist: %s" % handoff_path)
+		return
+	
+	var file := FileAccess.open(handoff_path, FileAccess.READ)
+	if file == null:
+		printerr("Main: failed to open handoff file: %s" % handoff_path)
+		return
+	var content := file.get_as_text()
+	file.close()
+	
+	# Delete handoff file immediately after reading
+	DirAccess.remove_absolute(handoff_path)
+	
+	var json := JSON.new()
+	var parse_err: Error = json.parse(content)
+	if parse_err != OK or not (json.data is Dictionary):
+		printerr("Main: malformed JSON in handoff file: %s" % handoff_path)
+		return
+	var handoff: Dictionary = json.data
+	
+	# Validate protocol == 1
+	var protocol: int = int(handoff.get("protocol", 0))
+	if protocol != 1:
+		printerr("Main: unsupported protocol version %d in handoff" % protocol)
+		return
+	
+	# Validate secret is 64 lowercase hex
+	var secret: String = str(handoff.get("secret", ""))
+	if secret.length() != 64:
+		printerr("Main: invalid secret length in handoff")
+		return
+	var secret_regex := RegEx.new()
+	secret_regex.compile("^[0-9a-f]{64}$")
+	if secret_regex.search(secret) == null:
+		printerr("Main: secret must be 64 lowercase hex characters")
+		return
+	
+	# Validate and ensure output_dir exists
+	var output_dir: String = str(handoff.get("output_dir", ""))
+	if output_dir.is_empty():
+		printerr("Main: missing output_dir in handoff")
+		return
+	if not DirAccess.dir_exists_absolute(output_dir):
+		var make_err: Error = DirAccess.make_dir_recursive_absolute(output_dir)
+		if make_err != OK:
+			printerr("Main: failed to create output_dir %s (error %d)" % [output_dir, make_err])
+			return
+	
+	MusicTools.output_dir = output_dir
+	
+	var music_tools: MusicTools
+	if Controller.agent_executor and Controller.agent_executor.music_tools:
+		music_tools = Controller.agent_executor.music_tools
+	else:
+		music_tools = MusicTools.new()
+	
+	_remote_control = REMOTE_CONTROL_SCRIPT.new(handoff, music_tools.execute)
+	_remote_control.shutdown_requested.connect(_on_remote_shutdown)
+	add_child(_remote_control)
+
+
+func _on_song_saved_event() -> void:
+	if _remote_control:
+		_remote_control.send_event("song_saved")
+
+
+func _on_remote_shutdown() -> void:
+	if _remote_control:
+		_remote_control.send_event("closing")
+	get_tree().quit()
 
 
 func _shortcut_input(event: InputEvent) -> void:

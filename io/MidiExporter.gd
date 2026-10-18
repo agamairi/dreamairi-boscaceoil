@@ -13,6 +13,19 @@ class_name MidiExporter extends RefCounted
 const FILE_EXTENSION := "mid"
 
 
+static func get_data(song: Song, export_config: ExportMasterPopup.ExportConfig = null) -> PackedByteArray:
+	if not song:
+		return PackedByteArray()
+	if not export_config:
+		export_config = ExportMasterPopup.ExportConfig.new()
+		export_config.type = ExportMasterPopup.ExportType.EXPORT_MIDI
+		export_config.loop_start = song.arrangement.loop_start
+		export_config.loop_end = song.arrangement.loop_end
+	var writer := MidiFileWriter.new()
+	_write(writer, song, export_config)
+	return writer.get_file_buffer()
+
+
 static func save(song: Song, path: String, export_config: ExportMasterPopup.ExportConfig) -> bool:
 	if path.get_extension() != FILE_EXTENSION:
 		printerr("MidiExporter: The MIDI file must have a .%s extension." % [ FILE_EXTENSION ])
@@ -24,12 +37,11 @@ static func save(song: Song, path: String, export_config: ExportMasterPopup.Expo
 		printerr("MidiExporter: Failed to open the file at '%s' for writing (code %d)." % [ path, error ])
 		return false
 	
-	var writer := MidiFileWriter.new()
-	_write(writer, song, export_config)
+	var buffer := get_data(song, export_config)
 	
 	# Try to write the file with the new contents.
 	
-	error = file.write_buffer_contents(writer.get_file_buffer())
+	error = file.write_buffer_contents(buffer)
 	if error != OK:
 		printerr("MidiExporter: Failed to write to the file at '%s' (code %d)." % [ path, error ])
 		return false

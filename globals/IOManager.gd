@@ -64,7 +64,14 @@ func initialize_song() -> void:
 
 func _try_load_song_from_args() -> bool:
 	var args := OS.get_cmdline_args()
+	var skip_next := false
 	for arg in args:
+		if skip_next:
+			skip_next = false
+			continue
+		if arg == "--dreamairi-handoff":
+			skip_next = true
+			continue
 		if arg.ends_with(".ceol"):
 			return _load_ceol_song_confirmed(arg)
 	
