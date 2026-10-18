@@ -131,6 +131,23 @@ func _init_remote_control() -> void:
 	_remote_control = REMOTE_CONTROL_SCRIPT.new(handoff, _execute_remote_tool)
 	_remote_control.shutdown_requested.connect(_on_remote_shutdown)
 	add_child(_remote_control)
+	
+	Controller.song_loaded.connect(_on_remote_song_changed)
+	Controller.song_sizes_changed.connect(_on_remote_song_changed)
+	Controller.song_bpm_changed.connect(_on_remote_song_changed)
+	Controller.song_effect_changed.connect(_on_remote_song_changed)
+	Controller.song_swing_changed.connect(_on_remote_song_changed)
+	Controller.song_pattern_created.connect(_on_remote_song_changed)
+	Controller.song_pattern_changed.connect(_on_remote_song_changed)
+	Controller.song_instrument_created.connect(_on_remote_song_changed)
+	Controller.song_instrument_changed.connect(_on_remote_song_changed)
+	
+	if Controller.music_player:
+		Controller.music_player.playback_started.connect(_on_remote_transport_changed)
+		Controller.music_player.playback_stopped.connect(_on_remote_transport_changed)
+		Controller.music_player.playback_paused.connect(_on_remote_transport_changed)
+		Controller.music_player.playback_tick.connect(_on_remote_transport_changed)
+		Controller.music_player.playback_bar_changed.connect(_on_remote_transport_changed)
 
 
 func _execute_remote_tool(tool_name: String, args: Dictionary) -> Dictionary:
@@ -145,7 +162,31 @@ func _on_song_saved_event() -> void:
 		_remote_control.send_event("song_saved")
 
 
+func _on_remote_song_changed() -> void:
+	if _remote_control:
+		_remote_control.notify_song_changed()
+
+
+func _on_remote_transport_changed() -> void:
+	if _remote_control:
+		var is_playing: bool = false
+		var step: int = 0
+		if Controller.music_player:
+			is_playing = Controller.music_player.is_playing()
+			step = maxi(0, Controller.music_player.get_pattern_time())
+		var bar: int = 0
+		if Controller.current_song and Controller.current_song.arrangement:
+			bar = Controller.current_song.arrangement.current_bar_idx
+		_remote_control.notify_transport(is_playing, bar, step)
+
+
 func _on_remote_shutdown() -> void:
+	if DisplayServer.get_name() == "headless":
+		if _remote_control:
+			_remote_control.send_event("closing")
+		get_tree().quit()
+		return
+
 	# Ask for confirmation before quitting if there are unsaved edits so work is not lost.
 	if Controller.current_song and Controller.current_song.is_dirty():
 		Controller.io_manager.check_song_on_exit()

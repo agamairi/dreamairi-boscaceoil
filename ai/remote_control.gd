@@ -11,6 +11,9 @@ signal client_disconnected()
 
 const MAX_FRAME_SIZE: int = 4 * 1024 * 1024 # 4 MiB
 const DEFAULT_HELLO_TIMEOUT_MS: int = 5000
+const RELAY_TIMEOUT_MS: int = 15000 # 15 s
+const SONG_CHANGED_INTERVAL_MS: int = 100 # <= 10/s
+const TRANSPORT_INTERVAL_MS: int = 66 # <= ~15/s
 
 const DEFAULT_TOOLS: Array[String] = [
 	"create_song",
@@ -28,10 +31,36 @@ const DEFAULT_TOOLS: Array[String] = [
 	"load_song",
 	"save_song",
 	"export_song",
+	"get_transport",
+	"set_tempo",
 ]
+
+const VIEWER_TOOL_ALLOWLIST: Array[String] = [
+	"get_song_state",
+	"get_transport",
+	"play_song",
+	"set_tempo",
+	"add_notes",
+	"remove_notes",
+	"create_pattern",
+	"set_arrangement",
+	"list_instruments",
+]
+
+class ClientSlot extends RefCounted:
+	var peer: StreamPeerTCP = null
+	var role: String = "" # "controller" or "viewer"
+	var rx_buffer: PackedByteArray = PackedByteArray()
+	var expected_frame_len: int = -1
+	var connected_time_ms: int = 0
+	var hello_received: bool = false
+	
+	func is_peer_connected() -> bool:
+		return peer != null and peer.get_status() == StreamPeerTCP.STATUS_CONNECTED
 
 var bind_address: String = "127.0.0.1"
 var hello_timeout_ms: int = DEFAULT_HELLO_TIMEOUT_MS
+var relay_timeout_ms: int = RELAY_TIMEOUT_MS
 var tools: Array = []
 ## Advertised export formats. Defaults to ["midi"] always; WAV export is not supported remotely.
 var export_formats: Array = []
@@ -42,15 +71,25 @@ var _is_listening: bool = false
 var _executor: Callable = Callable()
 var _handoff: Dictionary = {}
 var _secret: String = ""
+var _viewer_secret: String = ""
 var _ready_file_path: String = ""
 var _output_dir: String = ""
 var _app_version: String = "1.0"
 
-var _client: StreamPeerTCP = null
-var _client_connected_time_ms: int = 0
-var _hello_received: bool = false
-var _rx_buffer: PackedByteArray = PackedByteArray()
-var _expected_frame_len: int = -1
+var _controller: ClientSlot = null
+var _viewer: ClientSlot = null
+var _pending_clients: Array[ClientSlot] = []
+
+var _pending_relays: Dictionary = {}
+var _next_rid: int = 0
+
+var _song_version: int = 0
+var _last_song_changed_ms: int = 0
+var _song_changed_pending: bool = false
+
+var _has_transport_state: bool = false
+var _last_transport_playing: bool = false
+var _last_transport_ms: int = 0
 
 
 ## Initializes the RemoteControl server.
@@ -62,6 +101,17 @@ func _init(handoff: Dictionary = {}, executor: Callable = Callable(), custom_too
 	_ready_file_path = str(_handoff.get("ready_file", ""))
 	_output_dir = str(_handoff.get("output_dir", ""))
 	_app_version = str(ProjectSettings.get_setting("application/config/version", "1.0"))
+	
+	var raw_viewer_secret: String = str(_handoff.get("viewer_secret", ""))
+	if raw_viewer_secret.length() == 64 and raw_viewer_secret != _secret:
+		var secret_regex := RegEx.new()
+		secret_regex.compile("^[0-9a-f]{64}$")
+		if secret_regex.search(raw_viewer_secret) != null:
+			_viewer_secret = raw_viewer_secret
+		else:
+			_viewer_secret = ""
+	else:
+		_viewer_secret = ""
 	
 	if not custom_tools.is_empty():
 		tools = custom_tools.duplicate()
@@ -101,8 +151,14 @@ func start() -> Error:
 
 
 func stop() -> void:
-	if _client != null:
-		_close_client("server stopped")
+	if _controller != null:
+		_close_slot(_controller, "server stopped")
+	if _viewer != null:
+		_close_slot(_viewer, "server stopped")
+	var pending_copy: Array[ClientSlot] = _pending_clients.duplicate()
+	for slot: ClientSlot in pending_copy:
+		_close_slot(slot, "server stopped")
+	_pending_clients.clear()
 	if _server != null and _is_listening:
 		_server.stop()
 		_is_listening = false
@@ -117,13 +173,59 @@ func get_bind_address() -> String:
 
 
 func is_client_connected() -> bool:
-	return _client != null and _client.get_status() == StreamPeerTCP.STATUS_CONNECTED and _hello_received
+	return (_controller != null and _controller.is_peer_connected() and _controller.hello_received) or (_viewer != null and _viewer.is_peer_connected() and _viewer.hello_received)
+
+
+func is_controller_connected() -> bool:
+	return _controller != null and _controller.is_peer_connected() and _controller.hello_received
+
+
+func is_viewer_connected() -> bool:
+	return _viewer != null and _viewer.is_peer_connected() and _viewer.hello_received
 
 
 func send_event(name: String) -> void:
-	if _client == null or _client.get_status() != StreamPeerTCP.STATUS_CONNECTED or not _hello_received:
-		return
-	_send_frame({"event": name})
+	_broadcast({"event": name})
+
+
+func notify_song_changed() -> void:
+	var now: int = Time.get_ticks_msec()
+	if (now - _last_song_changed_ms >= SONG_CHANGED_INTERVAL_MS) and not _song_changed_pending:
+		_song_version += 1
+		_last_song_changed_ms = now
+		_broadcast({"event": "song_changed", "version": _song_version})
+	else:
+		_song_changed_pending = true
+
+
+func notify_transport(playing: bool, bar: int, step: int) -> void:
+	var state_changed: bool = (not _has_transport_state) or (playing != _last_transport_playing)
+	var now: int = Time.get_ticks_msec()
+	if state_changed:
+		_has_transport_state = true
+		_last_transport_playing = playing
+		_last_transport_ms = now
+		_broadcast({
+			"event": "transport",
+			"playing": playing,
+			"bar": bar,
+			"step": step
+		})
+	elif now - _last_transport_ms >= TRANSPORT_INTERVAL_MS:
+		_last_transport_ms = now
+		_broadcast({
+			"event": "transport",
+			"playing": playing,
+			"bar": bar,
+			"step": step
+		})
+
+
+func _broadcast(dict: Dictionary) -> void:
+	if _controller != null and _controller.is_peer_connected() and _controller.hello_received:
+		_send_slot_frame(_controller, dict)
+	if _viewer != null and _viewer.is_peer_connected() and _viewer.hello_received:
+		_send_slot_frame(_viewer, dict)
 
 
 func _process(_delta: float) -> void:
@@ -134,91 +236,97 @@ func poll() -> void:
 	if not _is_listening:
 		return
 	
-	# Check for incoming connection
-	if _server.is_connection_available():
+	while _server.is_connection_available():
 		var new_peer: StreamPeerTCP = _server.take_connection()
-		if _client != null and _client.get_status() == StreamPeerTCP.STATUS_CONNECTED:
-			# Reject second concurrent client
+		if _pending_clients.size() >= 16:
 			new_peer.disconnect_from_host()
 			new_peer.poll()
 		else:
-			# Accept new client
-			_client = new_peer
-			_client.poll()
-			_rx_buffer.clear()
-			_expected_frame_len = -1
-			_hello_received = false
-			_client_connected_time_ms = Time.get_ticks_msec()
-			client_connected.emit()
+			var slot: ClientSlot = ClientSlot.new()
+			slot.peer = new_peer
+			slot.connected_time_ms = Time.get_ticks_msec()
+			_pending_clients.push_back(slot)
 	
-	if _client == null:
+	var pending_copy: Array[ClientSlot] = _pending_clients.duplicate()
+	for slot: ClientSlot in pending_copy:
+		if slot in _pending_clients:
+			_poll_slot(slot)
+	
+	if _controller != null:
+		_poll_slot(_controller)
+	
+	if _viewer != null:
+		_poll_slot(_viewer)
+	
+	_check_relay_timeouts()
+	_check_song_changed_coalesce()
+
+
+func _poll_slot(slot: ClientSlot) -> void:
+	if slot.peer == null:
 		return
 	
-	_client.poll()
-	var status: StreamPeerTCP.Status = _client.get_status()
+	slot.peer.poll()
+	var status: StreamPeerTCP.Status = slot.peer.get_status()
 	if status != StreamPeerTCP.STATUS_CONNECTED:
-		_client = null
-		_rx_buffer.clear()
-		_expected_frame_len = -1
-		_hello_received = false
-		client_disconnected.emit()
+		_close_slot(slot, "peer disconnected")
 		return
 	
-	if not _hello_received:
-		if Time.get_ticks_msec() - _client_connected_time_ms > hello_timeout_ms:
-			_close_client("hello timeout")
+	if not slot.hello_received:
+		if Time.get_ticks_msec() - slot.connected_time_ms > hello_timeout_ms:
+			_close_slot(slot, "hello timeout")
 			return
 	
-	var bytes_avail: int = _client.get_available_bytes()
+	var bytes_avail: int = slot.peer.get_available_bytes()
 	if bytes_avail > 0:
-		var res: Array = _client.get_data(bytes_avail)
+		var res: Array = slot.peer.get_data(bytes_avail)
 		var err: int = int(res[0])
 		var chunk: PackedByteArray = res[1]
 		if err != OK:
-			_close_client("read error %d" % err)
+			_close_slot(slot, "read error %d" % err)
 			return
 		if chunk.size() > 0:
-			_rx_buffer.append_array(chunk)
+			slot.rx_buffer.append_array(chunk)
 	
-	while _client != null:
-		if _expected_frame_len < 0:
-			if _rx_buffer.size() < 4:
+	while slot.peer != null:
+		if slot.expected_frame_len < 0:
+			if slot.rx_buffer.size() < 4:
 				break
-			var b0: int = _rx_buffer[0]
-			var b1: int = _rx_buffer[1]
-			var b2: int = _rx_buffer[2]
-			var b3: int = _rx_buffer[3]
-			_expected_frame_len = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
-			if _expected_frame_len < 0 or _expected_frame_len > MAX_FRAME_SIZE:
-				_close_client("oversized frame: %d" % _expected_frame_len)
+			var b0: int = slot.rx_buffer[0]
+			var b1: int = slot.rx_buffer[1]
+			var b2: int = slot.rx_buffer[2]
+			var b3: int = slot.rx_buffer[3]
+			slot.expected_frame_len = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+			if slot.expected_frame_len < 0 or slot.expected_frame_len > MAX_FRAME_SIZE:
+				_close_slot(slot, "oversized frame: %d" % slot.expected_frame_len)
 				return
 		
-		if _rx_buffer.size() < 4 + _expected_frame_len:
+		if slot.rx_buffer.size() < 4 + slot.expected_frame_len:
 			break
 		
-		var payload: PackedByteArray = _rx_buffer.slice(4, 4 + _expected_frame_len)
-		_rx_buffer = _rx_buffer.slice(4 + _expected_frame_len)
-		_expected_frame_len = -1
+		var payload: PackedByteArray = slot.rx_buffer.slice(4, 4 + slot.expected_frame_len)
+		slot.rx_buffer = slot.rx_buffer.slice(4 + slot.expected_frame_len)
+		slot.expected_frame_len = -1
 		
 		var json_str: String = payload.get_string_from_utf8()
-		var json := JSON.new()
+		var json: JSON = JSON.new()
 		var parse_err: Error = json.parse(json_str)
 		if parse_err != OK or not (json.data is Dictionary):
-			_close_client("malformed JSON frame")
+			_close_slot(slot, "malformed JSON frame")
 			return
 		
 		var frame: Dictionary = json.data
-		_handle_frame(frame)
+		_handle_frame_for_slot(slot, frame)
 
 
-func _handle_frame(frame: Dictionary) -> void:
+func _handle_frame_for_slot(slot: ClientSlot, frame: Dictionary) -> void:
 	var op: String = str(frame.get("op", ""))
 	
-	if not _hello_received:
+	if not slot.hello_received:
 		if op != "hello":
-			_close_client("non-hello first frame: %s" % op)
+			_close_slot(slot, "non-hello first frame: %s" % op)
 			return
-		_handle_hello(frame)
+		_handle_hello(slot, frame)
 		return
 	
 	var req_id: Variant = frame.get("id", null)
@@ -227,17 +335,34 @@ func _handle_frame(frame: Dictionary) -> void:
 			var reply: Dictionary = {"ok": true, "result": {}}
 			if req_id != null:
 				reply["id"] = req_id
-			_send_frame(reply)
+			_send_slot_frame(slot, reply)
 		
 		"shutdown":
+			if slot.role != "controller":
+				var reply: Dictionary = {"ok": false, "error": "shutdown not allowed for viewer"}
+				if req_id != null:
+					reply["id"] = req_id
+				_send_slot_frame(slot, reply)
+				return
+			
 			var reply: Dictionary = {"ok": true, "result": {}}
 			if req_id != null:
 				reply["id"] = req_id
-			_send_frame(reply)
+			_send_slot_frame(slot, reply)
 			shutdown_requested.emit()
 		
 		"tool":
 			var tool_name: String = str(frame.get("name", ""))
+			if slot.role == "viewer" and not (tool_name in VIEWER_TOOL_ALLOWLIST):
+				var reply: Dictionary = {
+					"ok": true,
+					"result": {"error": "tool not allowed for viewer"}
+				}
+				if req_id != null:
+					reply["id"] = req_id
+				_send_slot_frame(slot, reply)
+				return
+			
 			var args: Dictionary = {}
 			if frame.get("args") is Dictionary:
 				args = frame.get("args")
@@ -255,41 +380,136 @@ func _handle_frame(frame: Dictionary) -> void:
 			var reply: Dictionary = {"ok": true, "result": result}
 			if req_id != null:
 				reply["id"] = req_id
-			_send_frame(reply)
+			_send_slot_frame(slot, reply)
+		
+		"relay":
+			var action: String = str(frame.get("action", ""))
+			if action != "save" and action != "rate":
+				var reply: Dictionary = {"ok": false, "error": "unknown action: %s" % action}
+				if req_id != null:
+					reply["id"] = req_id
+				_send_slot_frame(slot, reply)
+				return
+			
+			if _controller == null or not _controller.is_peer_connected() or not _controller.hello_received:
+				var reply: Dictionary = {"ok": false, "error": "no_controller"}
+				if req_id != null:
+					reply["id"] = req_id
+				_send_slot_frame(slot, reply)
+				return
+			
+			_next_rid += 1
+			var rid: int = _next_rid
+			var relay_args: Dictionary = {}
+			if frame.get("args") is Dictionary:
+				relay_args = frame.get("args")
+			
+			_pending_relays[rid] = {
+				"id": req_id,
+				"viewer": slot,
+				"created_ms": Time.get_ticks_msec(),
+			}
+			
+			var forward_event: Dictionary = {
+				"event": "relay_request",
+				"rid": rid,
+				"action": action,
+				"args": relay_args,
+			}
+			_send_slot_frame(_controller, forward_event)
+		
+		"relay_result":
+			if slot.role != "controller":
+				return
+			
+			var rid: int = int(frame.get("rid", -1))
+			if not _pending_relays.has(rid):
+				return
+			
+			var relay_info: Dictionary = _pending_relays[rid]
+			_pending_relays.erase(rid)
+			
+			var target_slot: ClientSlot = relay_info.get("viewer")
+			var orig_id: Variant = relay_info.get("id")
+			var is_ok: bool = bool(frame.get("ok", false))
+			
+			var viewer_reply: Dictionary = {
+				"ok": is_ok,
+			}
+			if orig_id != null:
+				viewer_reply["id"] = orig_id
+			if frame.has("result"):
+				viewer_reply["result"] = frame.get("result")
+			if frame.has("error"):
+				viewer_reply["error"] = frame.get("error")
+			
+			if target_slot != null and target_slot.is_peer_connected():
+				_send_slot_frame(target_slot, viewer_reply)
 		
 		_:
 			var reply: Dictionary = {"ok": false, "error": "unknown op: %s" % op}
 			if req_id != null:
 				reply["id"] = req_id
-			_send_frame(reply)
+			_send_slot_frame(slot, reply)
 
 
-func _handle_hello(frame: Dictionary) -> void:
+func _handle_hello(slot: ClientSlot, frame: Dictionary) -> void:
 	var client_protocol: int = int(frame.get("protocol", 0))
 	if client_protocol != 1:
-		_send_frame({"ok": false, "error": "unsupported protocol: %d" % client_protocol})
-		_close_client("unsupported protocol")
+		_send_slot_frame(slot, {"ok": false, "error": "unsupported protocol: %d" % client_protocol})
+		_close_slot(slot, "unsupported protocol")
 		return
 	
 	var client_secret: String = str(frame.get("secret", ""))
-	if not constant_time_compare(client_secret, _secret):
-		_send_frame({"ok": false, "error": "invalid secret"})
-		_close_client("invalid secret")
-		return
+	var match_controller: bool = constant_time_compare(client_secret, _secret)
+	var match_viewer: bool = false
+	if not _viewer_secret.is_empty():
+		match_viewer = constant_time_compare(client_secret, _viewer_secret)
+	else:
+		var _dummy: bool = constant_time_compare(client_secret, "")
 	
-	_hello_received = true
+	if match_controller:
+		if _controller != null and _controller.is_peer_connected():
+			_send_slot_frame(slot, {"ok": false, "error": "controller role already occupied"})
+			_close_slot(slot, "controller role already occupied")
+			return
+		_pending_clients.erase(slot)
+		slot.role = "controller"
+		slot.hello_received = true
+		_controller = slot
+		_send_hello_reply(slot)
+		client_connected.emit()
+	elif match_viewer:
+		if _viewer != null and _viewer.is_peer_connected():
+			_send_slot_frame(slot, {"ok": false, "error": "viewer role already occupied"})
+			_close_slot(slot, "viewer role already occupied")
+			return
+		_pending_clients.erase(slot)
+		slot.role = "viewer"
+		slot.hello_received = true
+		_viewer = slot
+		_send_hello_reply(slot)
+		client_connected.emit()
+	else:
+		_send_slot_frame(slot, {"ok": false, "error": "invalid secret"})
+		_close_slot(slot, "invalid secret")
+		return
+
+
+func _send_hello_reply(slot: ClientSlot) -> void:
 	var reply: Dictionary = {
 		"ok": true,
 		"protocol": 1,
 		"app_version": _app_version,
 		"tools": tools,
 		"export": export_formats,
+		"features": ["viewer", "relay", "transport"],
 	}
-	_send_frame(reply)
+	_send_slot_frame(slot, reply)
 
 
-func _send_frame(dict: Dictionary) -> Error:
-	if _client == null or _client.get_status() != StreamPeerTCP.STATUS_CONNECTED:
+func _send_slot_frame(slot: ClientSlot, dict: Dictionary) -> Error:
+	if slot == null or slot.peer == null or slot.peer.get_status() != StreamPeerTCP.STATUS_CONNECTED:
 		return ERR_CONNECTION_ERROR
 	
 	var json_str: String = JSON.stringify(dict)
@@ -306,22 +526,70 @@ func _send_frame(dict: Dictionary) -> Error:
 	header[2] = (payload_len >> 8) & 0xff
 	header[3] = payload_len & 0xff
 	
-	var err: Error = _client.put_data(header)
+	var err: Error = slot.peer.put_data(header)
 	if err != OK:
 		return err
-	err = _client.put_data(payload)
+	err = slot.peer.put_data(payload)
+	if err == OK:
+		slot.peer.poll()
 	return err
 
 
-func _close_client(_reason: String = "") -> void:
-	if _client != null:
-		_client.disconnect_from_host()
-		_client.poll()
-		_client = null
-	_rx_buffer.clear()
-	_expected_frame_len = -1
-	_hello_received = false
-	client_disconnected.emit()
+func _close_slot(slot: ClientSlot, _reason: String = "") -> void:
+	var was_authenticated: bool = slot.hello_received
+	slot.hello_received = false
+	
+	if slot.peer != null:
+		slot.peer.disconnect_from_host()
+		slot.peer.poll()
+		slot.peer = null
+	slot.rx_buffer.clear()
+	slot.expected_frame_len = -1
+	
+	if slot == _controller:
+		_controller = null
+		if was_authenticated:
+			client_disconnected.emit()
+	elif slot == _viewer:
+		_viewer = null
+		if was_authenticated:
+			client_disconnected.emit()
+	else:
+		_pending_clients.erase(slot)
+
+
+func _check_relay_timeouts() -> void:
+	if _pending_relays.is_empty():
+		return
+	var now: int = Time.get_ticks_msec()
+	var timed_out_rids: Array[int] = []
+	for rid: int in _pending_relays:
+		var info: Dictionary = _pending_relays[rid]
+		var created_ms: int = int(info.get("created_ms", 0))
+		if now - created_ms > relay_timeout_ms:
+			timed_out_rids.push_back(rid)
+	
+	for rid: int in timed_out_rids:
+		var info: Dictionary = _pending_relays[rid]
+		_pending_relays.erase(rid)
+		var target_slot: ClientSlot = info.get("viewer")
+		var orig_id: Variant = info.get("id")
+		if target_slot != null and target_slot.is_peer_connected():
+			var reply: Dictionary = {"ok": false, "error": "timeout"}
+			if orig_id != null:
+				reply["id"] = orig_id
+			_send_slot_frame(target_slot, reply)
+
+
+func _check_song_changed_coalesce() -> void:
+	if not _song_changed_pending:
+		return
+	var now: int = Time.get_ticks_msec()
+	if now - _last_song_changed_ms >= SONG_CHANGED_INTERVAL_MS:
+		_song_version += 1
+		_last_song_changed_ms = now
+		_song_changed_pending = false
+		_broadcast({"event": "song_changed", "version": _song_version})
 
 
 func _write_ready_file() -> void:

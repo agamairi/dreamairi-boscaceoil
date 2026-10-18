@@ -150,5 +150,8 @@ func _refresh_ui(tool_name: String) -> void:
 			Controller.song_sizes_changed.emit()
 		"set_effect":
 			Controller.song_effect_changed.emit()
+		"set_tempo":
+			Controller.song_bpm_changed.emit()
 		"play_song":
 			pass # Playback handles its own UI.
+

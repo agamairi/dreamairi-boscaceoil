@@ -65,6 +65,8 @@ func execute(tool_name: String, arguments: Dictionary) -> Dictionary:
 		"snapshot": result = _snapshot(arguments)
 		"load_song": result = _load_song(arguments)
 		"save_song": result = _save_song(arguments)
+		"get_transport": result = _get_transport(arguments)
+		"set_tempo": result = _set_tempo(arguments)
 		_: result = {"error": "Unknown tool: %s" % tool_name}
 
 	call_log.push_back({"tool": tool_name, "arguments": arguments, "result": result, "elapsed_ms": Time.get_ticks_msec() - t0, "timestamp": Time.get_datetime_string_from_system()})
@@ -451,3 +453,45 @@ func _coerce_entry_dict(v: Variant) -> Dictionary:
 		if a.size() >= 3:
 			return {"bar": int(a[0]), "channel": int(a[1]), "pattern_index": int(a[2])}
 	return {}
+
+
+func _get_transport(_args: Dictionary) -> Dictionary:
+	var song: Song = Controller.current_song
+	if not song:
+		return {"error": "No song loaded"}
+	
+	var is_playing: bool = false
+	var step: int = 0
+	if Controller.music_player:
+		is_playing = Controller.music_player.is_playing()
+		var ptime: int = Controller.music_player.get_pattern_time()
+		step = maxi(0, ptime)
+	
+	var bar: int = 0
+	var timeline_len: int = 1
+	if song.arrangement:
+		bar = song.arrangement.current_bar_idx
+		timeline_len = song.arrangement.timeline_length
+	
+	return {
+		"playing": is_playing,
+		"bar": bar,
+		"step": step,
+		"pattern_size": song.pattern_size,
+		"timeline_length": timeline_len,
+		"bpm": song.bpm,
+	}
+
+
+func _set_tempo(args: Dictionary) -> Dictionary:
+	var song: Song = Controller.current_song
+	if not song:
+		return {"error": "No song loaded"}
+	
+	var bpm: int = clampi(int(args.get("bpm", 120)), 10, 450)
+	song.bpm = bpm
+	if Controller.music_player:
+		Controller.music_player.update_driver_bpm()
+	song.mark_dirty()
+	return {"success": true, "bpm": song.bpm}
+

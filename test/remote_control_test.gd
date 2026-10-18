@@ -1,12 +1,14 @@
 extends SceneTree
 
 const TEST_SECRET: String = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+const TEST_VIEWER_SECRET: String = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 const WRONG_SECRET: String = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 
 var checks: int = 0
 var passed: int = 0
 var fake_executor_calls: Array[Dictionary] = []
 var shutdown_signal_fired: bool = false
+var _client_buffers: Dictionary = {}
 
 
 func _init() -> void:
@@ -18,6 +20,8 @@ func fake_executor(tool_name: String, args: Dictionary) -> Dictionary:
 	if tool_name == "custom_test_tool":
 		var v: int = int(args.get("val", 0))
 		return {"executed": true, "received_arg": v * 2}
+	elif tool_name == "play_song":
+		return {"success": true, "action": args.get("action", "play")}
 	return {"ok": true}
 
 
@@ -45,6 +49,7 @@ func _run() -> void:
 	var handoff: Dictionary = {
 		"protocol": 1,
 		"secret": TEST_SECRET,
+		"viewer_secret": TEST_VIEWER_SECRET,
 		"output_dir": tmp_dir,
 		"ready_file": ready_path,
 	}
@@ -52,6 +57,7 @@ func _run() -> void:
 	var server_script: GDScript = preload("res://ai/remote_control.gd")
 	var server: Node = server_script.new(handoff, fake_executor)
 	server.hello_timeout_ms = 400
+	server.relay_timeout_ms = 15000
 	server.shutdown_requested.connect(func() -> void: shutdown_signal_fired = true)
 	root.add_child(server)
 	await process_frame
@@ -63,7 +69,7 @@ func _run() -> void:
 	var ready_data: Dictionary = {}
 	if ready_exists:
 		var rf: FileAccess = FileAccess.open(ready_path, FileAccess.READ)
-		var json := JSON.new()
+		var json: JSON = JSON.new()
 		var perr: Error = json.parse(rf.get_as_text())
 		rf.close()
 		if perr == OK and json.data is Dictionary:
@@ -73,10 +79,11 @@ func _run() -> void:
 	# Check 2: loopback-only bind
 	check("loopback-only bind", server.get_bind_address() == "127.0.0.1" and port > 0)
 	
-	# Check 3: handshake ok
+	# Check 3: client1 connected (controller)
 	var client1: StreamPeerTCP = await _connect_client(port)
 	check("client1 connected", client1 != null and client1.get_status() == StreamPeerTCP.STATUS_CONNECTED)
 	
+	# Check 4: handshake ok (controller)
 	_send_frame(client1, {
 		"op": "hello",
 		"protocol": 1,
@@ -85,46 +92,285 @@ func _run() -> void:
 	})
 	var hello_reply: Dictionary = await _read_frame(client1)
 	check("handshake ok", hello_reply.get("ok") == true and int(hello_reply.get("protocol", 0)) == 1 and hello_reply.get("tools") is Array and hello_reply.get("export") is Array)
+	
+	# Check 5: features in hello
+	var features: Array = hello_reply.get("features", [])
+	check("features in hello", features.has("viewer") and features.has("relay") and features.has("transport"))
+	
+	# Check 6: default hello advertises exactly ["midi"]
 	check("default hello advertises exactly [\"midi\"]", hello_reply.get("export") == ["midi"])
 	
-	# Check 4: ping
+	# Check 7: ping
 	_send_frame(client1, {"id": 1, "op": "ping"})
-	var ping_reply: Dictionary = await _read_frame(client1)
+	var ping_reply: Dictionary = await _read_response(client1)
 	check("ping", int(ping_reply.get("id", 0)) == 1 and ping_reply.get("ok") == true)
 	
-	# Check 5: tool round-trip through the executor
+	# Check 8: tool round-trip through the executor
 	_send_frame(client1, {
 		"id": 2,
 		"op": "tool",
 		"name": "custom_test_tool",
 		"args": {"val": 21}
 	})
-	var tool_reply: Dictionary = await _read_frame(client1)
+	var tool_reply: Dictionary = await _read_response(client1)
 	var tool_res: Dictionary = tool_reply.get("result", {})
 	check("tool round-trip through the executor", int(tool_reply.get("id", 0)) == 2 and tool_reply.get("ok") == true and tool_res.get("executed") == true and int(tool_res.get("received_arg", 0)) == 42)
 	
-	# Check 6: send_event
-	server.send_event("test_event_name")
-	var event_frame: Dictionary = await _read_frame(client1)
-	check("send_event", str(event_frame.get("event", "")) == "test_event_name")
+	# Check 9: viewer connected with viewer_secret
+	var viewer: StreamPeerTCP = await _connect_client(port)
+	_send_frame(viewer, {
+		"op": "hello",
+		"protocol": 1,
+		"secret": TEST_VIEWER_SECRET,
+		"client": "tui-studio"
+	})
+	var viewer_hello: Dictionary = await _read_frame(viewer)
+	check("viewer connected with viewer_secret", viewer_hello.get("ok") == true and (viewer_hello.get("features", []) as Array).has("viewer"))
 	
-	# Check 7: second client rejected while first connected
-	var client2: StreamPeerTCP = await _connect_client(port)
-	var client2_disconnected: bool = await _wait_for_disconnect(client2, 1000)
-	# Verify client 1 is still connected and operational
-	_send_frame(client1, {"id": 3, "op": "ping"})
-	var ping2_reply: Dictionary = await _read_frame(client1)
-	check("second client rejected while first connected", client2_disconnected and ping2_reply.get("ok") == true)
+	# Check 10: roles by secret
+	check("roles by secret", server.is_controller_connected() and server.is_viewer_connected())
 	
-	# Check 8: shutdown signal
-	_send_frame(client1, {"id": 4, "op": "shutdown"})
-	var shutdown_reply: Dictionary = await _read_frame(client1)
-	check("shutdown signal", shutdown_signal_fired and int(shutdown_reply.get("id", 0)) == 4 and shutdown_reply.get("ok") == true)
+	# Check 11: duplicate controller closed after hello
+	var dup_ctrl: StreamPeerTCP = await _connect_client(port)
+	_send_frame(dup_ctrl, {
+		"op": "hello",
+		"protocol": 1,
+		"secret": TEST_SECRET,
+		"client": "dup-ctrl"
+	})
+	var dup_ctrl_reply: Dictionary = await _read_frame(dup_ctrl)
+	var dup_ctrl_disconnected: bool = await _wait_for_disconnect(dup_ctrl, 1000)
+	check("duplicate controller rejected and closed", dup_ctrl_reply.get("ok") == false and dup_ctrl_disconnected)
+	
+	# Check 12: duplicate viewer closed after hello
+	var dup_view: StreamPeerTCP = await _connect_client(port)
+	_send_frame(dup_view, {
+		"op": "hello",
+		"protocol": 1,
+		"secret": TEST_VIEWER_SECRET,
+		"client": "dup-view"
+	})
+	var dup_view_reply: Dictionary = await _read_frame(dup_view)
+	var dup_view_disconnected: bool = await _wait_for_disconnect(dup_view, 1000)
+	check("duplicate viewer rejected and closed", dup_view_reply.get("ok") == false and dup_view_disconnected)
+	
+	# Check 13: events reach both clients
+	server.send_event("test_broadcast_event")
+	var ctrl_evt: Dictionary = await _read_frame(client1)
+	var view_evt: Dictionary = await _read_frame(viewer)
+	check("events reach both clients", str(ctrl_evt.get("event", "")) == "test_broadcast_event" and str(view_evt.get("event", "")) == "test_broadcast_event")
+	
+	# Check 14: viewer allowlist - allowed tool passes
+	_send_frame(viewer, {
+		"id": 10,
+		"op": "tool",
+		"name": "play_song",
+		"args": {"action": "play"}
+	})
+	var v_play_reply: Dictionary = await _read_response(viewer)
+	check("viewer allowed tool passes", int(v_play_reply.get("id", 0)) == 10 and v_play_reply.get("ok") == true and v_play_reply.get("result", {}).get("success") == true)
+	
+	# Check 15: viewer allowlist - save_song refused
+	_send_frame(viewer, {
+		"id": 11,
+		"op": "tool",
+		"name": "save_song",
+		"args": {"name": "test"}
+	})
+	var v_save_reply: Dictionary = await _read_response(viewer)
+	check("viewer refused save_song", v_save_reply.get("ok") == true and str(v_save_reply.get("result", {}).get("error", "")) == "tool not allowed for viewer")
+	
+	# Check 16: viewer allowlist - snapshot refused
+	_send_frame(viewer, {
+		"id": 12,
+		"op": "tool",
+		"name": "snapshot",
+		"args": {}
+	})
+	var v_snap_reply: Dictionary = await _read_response(viewer)
+	check("viewer refused snapshot", v_snap_reply.get("ok") == true and str(v_snap_reply.get("result", {}).get("error", "")) == "tool not allowed for viewer")
+	
+	# Check 17: viewer allowlist - create_song refused
+	_send_frame(viewer, {
+		"id": 13,
+		"op": "tool",
+		"name": "create_song",
+		"args": {"bpm": 120}
+	})
+	var v_create_reply: Dictionary = await _read_response(viewer)
+	check("viewer refused create_song", v_create_reply.get("ok") == true and str(v_create_reply.get("result", {}).get("error", "")) == "tool not allowed for viewer")
+	
+	# Check 18: viewer allowlist - add_instrument refused
+	_send_frame(viewer, {
+		"id": 14,
+		"op": "tool",
+		"name": "add_instrument",
+		"args": {"category": "MIDI", "name": "Piano"}
+	})
+	var v_inst_reply: Dictionary = await _read_response(viewer)
+	check("viewer refused add_instrument", v_inst_reply.get("ok") == true and str(v_inst_reply.get("result", {}).get("error", "")) == "tool not allowed for viewer")
+	
+	# Check 19: viewer shutdown refused
+	_send_frame(viewer, {
+		"id": 15,
+		"op": "shutdown"
+	})
+	var v_shut_reply: Dictionary = await _read_response(viewer)
+	check("viewer shutdown refused", v_shut_reply.get("ok") == false and shutdown_signal_fired == false)
+	
+	# Check 20: relay happy path
+	_send_frame(viewer, {
+		"id": 20,
+		"op": "relay",
+		"action": "save",
+		"args": {"prompt": "ambient cave theme"}
+	})
+	var req_event: Dictionary = await _read_frame(client1)
+	var relay_rid: int = int(req_event.get("rid", -1))
+	var relay_req_ok: bool = (str(req_event.get("event", "")) == "relay_request" and relay_rid > 0 and str(req_event.get("action", "")) == "save")
+	
+	_send_frame(client1, {
+		"op": "relay_result",
+		"rid": relay_rid,
+		"ok": true,
+		"result": {"id": "log-1", "saved": true}
+	})
+	var relay_reply: Dictionary = await _read_response(viewer)
+	check("relay happy path", relay_req_ok and int(relay_reply.get("id", 0)) == 20 and relay_reply.get("ok") == true and relay_reply.get("result", {}).get("id") == "log-1")
+	
+	# Check 21: relay unknown action refused
+	_send_frame(viewer, {
+		"id": 21,
+		"op": "relay",
+		"action": "destroy_everything",
+		"args": {}
+	})
+	var bad_action_reply: Dictionary = await _read_response(viewer)
+	check("relay unknown action refused", int(bad_action_reply.get("id", 0)) == 21 and bad_action_reply.get("ok") == false)
+	
+	# Check 22: relay timeout
+	server.relay_timeout_ms = 100
+	_send_frame(viewer, {
+		"id": 22,
+		"op": "relay",
+		"action": "rate",
+		"args": {"id": "log-1", "rating": 5}
+	})
+	var req_event2: Dictionary = await _read_frame(client1)
+	var timeout_reply: Dictionary = await _read_response(viewer, 1000)
+	check("relay timeout", str(req_event2.get("event", "")) == "relay_request" and int(timeout_reply.get("id", 0)) == 22 and timeout_reply.get("ok") == false and timeout_reply.get("error") == "timeout")
+	server.relay_timeout_ms = 15000
+	
+	# Check 23: relay result from non-controller ignored
+	_send_frame(viewer, {
+		"op": "relay_result",
+		"rid": 9999,
+		"ok": true,
+		"result": {}
+	})
+	await _wait_frames(3)
+	check("relay result from non-controller ignored", true)
+	
+	# Check 24: song_changed coalescing and strictly increasing version
+	# Calling notify_song_changed 5 times in a row
+	server.notify_song_changed()
+	server.notify_song_changed()
+	server.notify_song_changed()
+	server.notify_song_changed()
+	server.notify_song_changed()
+	
+	var sc1_ctrl: Dictionary = await _read_frame(client1)
+	var sc1_view: Dictionary = await _read_frame(viewer)
+	var v1: int = int(sc1_ctrl.get("version", 0))
+	
+	# Wait for trailing edge (> 100ms)
+	OS.delay_msec(120)
+	await _wait_frames(5)
+	
+	var sc2_ctrl: Dictionary = await _read_frame(client1)
+	var sc2_view: Dictionary = await _read_frame(viewer)
+	var v2: int = int(sc2_ctrl.get("version", 0))
+	check("song_changed coalescing and strictly increasing version", str(sc1_ctrl.get("event", "")) == "song_changed" and str(sc1_view.get("event", "")) == "song_changed" and str(sc2_ctrl.get("event", "")) == "song_changed" and str(sc2_view.get("event", "")) == "song_changed" and v1 > 0 and v2 > v1)
+	
+	# Check 25: transport event rate limit and immediate start/stop
+	server.notify_transport(true, 0, 0)
+	var t1: Dictionary = await _read_frame(client1)
+	await _read_frame(viewer) # Drain viewer
+	
+	# Immediate call within interval is throttled
+	server.notify_transport(true, 0, 1)
+	var t_throttled: Dictionary = await _read_frame(client1, 20)
+	
+	# After waiting interval, it emits
+	OS.delay_msec(75)
+	await _wait_frames(3)
+	server.notify_transport(true, 0, 2)
+	var t2: Dictionary = await _read_frame(client1)
+	await _read_frame(viewer) # Drain viewer
+	
+	# State change to stopped is immediate
+	server.notify_transport(false, 0, 2)
+	var t3: Dictionary = await _read_frame(client1)
+	await _read_frame(viewer) # Drain viewer
+	check("transport event rate limit and immediate start/stop", t1.get("playing") == true and int(t1.get("step", -1)) == 0 and t_throttled.is_empty() and t2.get("playing") == true and int(t2.get("step", -1)) == 2 and t3.get("playing") == false)
+	
+	# Check 26: relay no controller returns error
+	client1.disconnect_from_host()
+	await _wait_frames(5)
+	_send_frame(viewer, {
+		"id": 23,
+		"op": "relay",
+		"action": "save",
+		"args": {}
+	})
+	var no_ctrl_reply: Dictionary = await _read_response(viewer)
+	check("relay no controller returns error", int(no_ctrl_reply.get("id", 0)) == 23 and no_ctrl_reply.get("ok") == false and str(no_ctrl_reply.get("error", "")) == "no_controller")
+	
+	# Check 27: viewer disabled when handoff has no viewer_secret
+	var no_viewer_ready_path: String = tmp_dir.path_join("ready_no_viewer.json")
+	var no_viewer_handoff: Dictionary = {
+		"protocol": 1,
+		"secret": TEST_SECRET,
+		"output_dir": tmp_dir,
+		"ready_file": no_viewer_ready_path,
+	}
+	var no_viewer_server: Node = server_script.new(no_viewer_handoff, fake_executor)
+	root.add_child(no_viewer_server)
+	await process_frame
+	var no_v_port: int = no_viewer_server.get_port()
+	var no_v_client: StreamPeerTCP = await _connect_client(no_v_port)
+	_send_frame(no_v_client, {
+		"op": "hello",
+		"protocol": 1,
+		"secret": TEST_VIEWER_SECRET,
+		"client": "test"
+	})
+	var no_v_reply: Dictionary = await _read_frame(no_v_client)
+	var no_v_disconnected: bool = await _wait_for_disconnect(no_v_client, 1000)
+	check("viewer disabled when handoff has no viewer_secret", no_v_reply.get("ok") == false and no_v_disconnected)
+	no_viewer_server.stop()
+	DirAccess.remove_absolute(no_viewer_ready_path)
+	
+	# Reconnect client1 as controller for remaining tests
+	client1 = await _connect_client(port)
+	_send_frame(client1, {
+		"op": "hello",
+		"protocol": 1,
+		"secret": TEST_SECRET,
+		"client": "dreamairi-plugin"
+	})
+	await _read_frame(client1)
+	
+	# Check 28: shutdown signal
+	_send_frame(client1, {"id": 30, "op": "shutdown"})
+	var shutdown_reply: Dictionary = await _read_response(client1)
+	check("shutdown signal", shutdown_signal_fired and int(shutdown_reply.get("id", 0)) == 30 and shutdown_reply.get("ok") == true)
 	
 	client1.disconnect_from_host()
+	viewer.disconnect_from_host()
 	await _wait_frames(3)
 	
-	# Check 9: wrong secret rejected + closed
+	# Check 29: wrong secret rejected + closed
 	var client3: StreamPeerTCP = await _connect_client(port)
 	_send_frame(client3, {
 		"op": "hello",
@@ -137,16 +383,15 @@ func _run() -> void:
 	check("wrong secret rejected + closed", wrong_sec_reply.get("ok") == false and client3_disconnected)
 	await _wait_frames(3)
 	
-	# Check 10: non-hello first frame closed
+	# Check 30: non-hello first frame closed
 	var client4: StreamPeerTCP = await _connect_client(port)
 	_send_frame(client4, {"id": 5, "op": "ping"})
 	var client4_disconnected: bool = await _wait_for_disconnect(client4, 1000)
 	check("non-hello first frame closed", client4_disconnected)
 	await _wait_frames(3)
 	
-	# Check 11: oversized length prefix closes
+	# Check 31: oversized length prefix closes
 	var client5: StreamPeerTCP = await _connect_client(port)
-	# Send length prefix of 5 MiB = 5242880
 	var header_oversized: PackedByteArray = PackedByteArray()
 	header_oversized.resize(4)
 	header_oversized[0] = 0x00
@@ -158,7 +403,7 @@ func _run() -> void:
 	check("oversized length prefix closes", client5_disconnected)
 	await _wait_frames(3)
 	
-	# Check 12: malformed JSON closes
+	# Check 32: malformed JSON closes
 	var client6: StreamPeerTCP = await _connect_client(port)
 	var bad_json_bytes: PackedByteArray = "{not valid json!".to_utf8_buffer()
 	var header_bad: PackedByteArray = PackedByteArray()
@@ -174,13 +419,12 @@ func _run() -> void:
 	check("malformed JSON closes", client6_disconnected)
 	await _wait_frames(3)
 	
-	# Check 13: hello timeout closes
+	# Check 33: hello timeout closes
 	var client7: StreamPeerTCP = await _connect_client(port)
-	# Wait for server's hello_timeout_ms (400ms) to trigger close
 	var client7_disconnected: bool = await _wait_for_disconnect(client7, 1200)
 	check("hello timeout closes", client7_disconnected)
 	
-	# Check 14: custom_export server advertises both ["midi", "wav"]
+	# Check 34: custom_export client connected
 	var custom_ready_path: String = tmp_dir.path_join("ready_custom.json")
 	var custom_handoff: Dictionary = {
 		"protocol": 1,
@@ -197,6 +441,7 @@ func _run() -> void:
 	var custom_client: StreamPeerTCP = await _connect_client(custom_port)
 	check("custom_export client connected", custom_client != null and custom_client.get_status() == StreamPeerTCP.STATUS_CONNECTED)
 	
+	# Check 35: custom_export server advertises both ["midi", "wav"]
 	_send_frame(custom_client, {
 		"op": "hello",
 		"protocol": 1,
@@ -251,8 +496,9 @@ func _send_frame(client: StreamPeerTCP, dict: Dictionary) -> void:
 
 func _read_frame(client: StreamPeerTCP, timeout_ms: int = 1500) -> Dictionary:
 	var start_ms: int = Time.get_ticks_msec()
-	var buf: PackedByteArray = PackedByteArray()
-	var expected_len: int = -1
+	if not _client_buffers.has(client):
+		_client_buffers[client] = PackedByteArray()
+	var buf: PackedByteArray = _client_buffers[client]
 	
 	while Time.get_ticks_msec() - start_ms < timeout_ms:
 		client.poll()
@@ -264,16 +510,29 @@ func _read_frame(client: StreamPeerTCP, timeout_ms: int = 1500) -> Dictionary:
 			if int(res[0]) == OK and (res[1] as PackedByteArray).size() > 0:
 				buf.append_array(res[1])
 		
-		if expected_len < 0 and buf.size() >= 4:
-			expected_len = (buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3]
-		
-		if expected_len >= 0 and buf.size() >= 4 + expected_len:
-			var payload: PackedByteArray = buf.slice(4, 4 + expected_len)
-			var json := JSON.new()
-			if json.parse(payload.get_string_from_utf8()) == OK and json.data is Dictionary:
-				return json.data
-			return {}
+		if buf.size() >= 4:
+			var expected_len: int = (buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3]
+			if buf.size() >= 4 + expected_len:
+				var payload: PackedByteArray = buf.slice(4, 4 + expected_len)
+				_client_buffers[client] = buf.slice(4 + expected_len)
+				var json: JSON = JSON.new()
+				if json.parse(payload.get_string_from_utf8()) == OK and json.data is Dictionary:
+					return json.data
+				return {}
 		await process_frame
+	_client_buffers[client] = buf
+	return {}
+
+
+func _read_response(client: StreamPeerTCP, timeout_ms: int = 1500) -> Dictionary:
+	var start_ms: int = Time.get_ticks_msec()
+	while Time.get_ticks_msec() - start_ms < timeout_ms:
+		var frame: Dictionary = await _read_frame(client, timeout_ms)
+		if frame.is_empty():
+			return {}
+		if frame.has("event"):
+			continue
+		return frame
 	return {}
 
 
