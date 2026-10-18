@@ -10,6 +10,7 @@ const REMOTE_CONTROL_SCRIPT := preload("res://ai/remote_control.gd")
 
 var _default_window_title: String = ""
 var _remote_control: RemoteControl = null
+var _remote_music_tools: MusicTools = null
 
 @onready var _pattern_editor: Control = %PatternEditor
 @onready var _locked_indicator: Control = %LockedIndicator
@@ -122,15 +123,21 @@ func _init_remote_control() -> void:
 	
 	MusicTools.output_dir = output_dir
 	
-	var music_tools: MusicTools
 	if Controller.agent_executor and Controller.agent_executor.music_tools:
-		music_tools = Controller.agent_executor.music_tools
+		_remote_music_tools = Controller.agent_executor.music_tools
 	else:
-		music_tools = MusicTools.new()
+		_remote_music_tools = MusicTools.new()
 	
-	_remote_control = REMOTE_CONTROL_SCRIPT.new(handoff, music_tools.execute)
+	_remote_control = REMOTE_CONTROL_SCRIPT.new(handoff, _execute_remote_tool)
 	_remote_control.shutdown_requested.connect(_on_remote_shutdown)
 	add_child(_remote_control)
+
+
+func _execute_remote_tool(tool_name: String, args: Dictionary) -> Dictionary:
+	var result: Dictionary = _remote_music_tools.execute(tool_name, args)
+	if not result.has("error") and Controller.agent_executor:
+		Controller.agent_executor._refresh_ui(tool_name)
+	return result
 
 
 func _on_song_saved_event() -> void:
