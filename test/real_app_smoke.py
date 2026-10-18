@@ -205,6 +205,15 @@ try:
     
     check("controller + viewer connected", r_ctrl.get("ok") and r_view.get("ok"))
 
+    # App ready -> get_transport is playing:false
+    s_ctrl.send({"id": 999, "op": "tool", "name": "get_transport", "args": {}})
+    r_tr_ready = s_ctrl.recv_response(999)
+    tr_ready = r_tr_ready.get("result", {})
+    check("app ready -> get_transport is playing:false",
+          r_tr_ready.get("ok") is True and
+          tr_ready.get("playing") is False and
+          tr_ready.get("step") == 0)
+
     # 2. Viewer set_tempo -> both see song_changed
     s_view.send({"id": 1, "op": "tool", "name": "set_tempo", "args": {"bpm": 140}})
     res_tempo = s_view.recv_response(1)
@@ -282,6 +291,60 @@ try:
     except (EOFError, socket.error):
         view2_closed = True
     check("a second viewer closed", view2_rejected and view2_closed)
+
+    # Snapshot current song state
+    s_ctrl.send({"id": 20, "op": "tool", "name": "snapshot", "args": {}})
+    r_snap = s_ctrl.recv_response(20)
+    snap_ceol = r_snap.get("result", {}).get("ceol", "")
+
+    # create_song leaves playback stopped
+    s_ctrl.send({"id": 21, "op": "tool", "name": "create_song", "args": {"bpm": 120}})
+    r_create = s_ctrl.recv_response(21)
+    s_ctrl.send({"id": 22, "op": "tool", "name": "get_transport", "args": {}})
+    r_tr_create = s_ctrl.recv_response(22)
+    tr_create = r_tr_create.get("result", {})
+    check("create_song leaves playback stopped",
+          r_create.get("ok") is True and
+          tr_create.get("playing") is False and
+          tr_create.get("step") == 0)
+
+    # load_song (using snapshot ceol) leaves playback stopped
+    s_ctrl.send({"id": 23, "op": "tool", "name": "load_song", "args": {"ceol": snap_ceol}})
+    r_load = s_ctrl.recv_response(23)
+    s_ctrl.send({"id": 24, "op": "tool", "name": "get_transport", "args": {}})
+    r_tr_load = s_ctrl.recv_response(24)
+    tr_load = r_tr_load.get("result", {})
+    check("load_song leaves playback stopped",
+          r_snap.get("ok") is True and len(snap_ceol) > 0 and
+          r_load.get("ok") is True and
+          tr_load.get("playing") is False and
+          tr_load.get("step") == 0)
+
+    # play_song play then starts it
+    s_ctrl.send({"id": 25, "op": "tool", "name": "play_song", "args": {"action": "play"}})
+    r_play_start = s_ctrl.recv_response(25)
+    s_ctrl.send({"id": 26, "op": "tool", "name": "get_transport", "args": {}})
+    r_tr_play_start = s_ctrl.recv_response(26)
+    tr_play_start = r_tr_play_start.get("result", {})
+    check("play_song play starts playback",
+          r_play_start.get("ok") is True and
+          tr_play_start.get("playing") is True)
+
+    # create_song with "autoplay": true plays
+    s_ctrl.send({"id": 27, "op": "tool", "name": "create_song", "args": {"bpm": 130, "autoplay": True}})
+    r_auto = s_ctrl.recv_response(27)
+    s_ctrl.send({"id": 28, "op": "tool", "name": "get_transport", "args": {}})
+    r_tr_auto = s_ctrl.recv_response(28)
+    tr_auto = r_tr_auto.get("result", {})
+    check("create_song with autoplay:true plays",
+          r_auto.get("ok") is True and
+          tr_auto.get("playing") is True)
+
+    # Stop playback and drain before proceeding
+    s_ctrl.send({"id": 29, "op": "tool", "name": "play_song", "args": {"action": "stop"}})
+    s_ctrl.recv_response(29)
+    s_ctrl.drain_events(0.1)
+    s_view.drain_events(0.1)
 
     # 8. Relay: controller answers viewer relay with relay_result and checks no-controller error
     s_view.send({"id": 10, "op": "relay", "action": "save", "args": {"prompt": "smoke test song"}})

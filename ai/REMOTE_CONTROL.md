@@ -113,7 +113,7 @@ Roles are determined strictly by secret matching, never by client claim. A missi
 
 ## Tools
 
-Reachable via `op: "tool"`:
+Reachable via `op: "tool"` (in engine mode, playback remains stopped after startup, `create_song`, and `load_song` unless `"autoplay": true` is passed):
 
 | Tool | Parameters | Viewer Allowed | Description |
 |---|---|:---:|---|

@@ -148,13 +148,29 @@ func _init_remote_control() -> void:
 		Controller.music_player.playback_paused.connect(_on_remote_transport_changed)
 		Controller.music_player.playback_tick.connect(_on_remote_transport_changed)
 		Controller.music_player.playback_bar_changed.connect(_on_remote_transport_changed)
+		Controller.music_player.stop_playback()
 
 
 func _execute_remote_tool(tool_name: String, args: Dictionary) -> Dictionary:
 	var result: Dictionary = _remote_music_tools.execute(tool_name, args)
-	if not result.has("error") and Controller.agent_executor:
-		Controller.agent_executor._refresh_ui(tool_name)
+	if not result.has("error"):
+		if (tool_name == "create_song" or tool_name == "load_song") and not _is_autoplay(args):
+			if Controller.music_player:
+				Controller.music_player.stop_playback()
+		if Controller.agent_executor:
+			Controller.agent_executor._refresh_ui(tool_name)
 	return result
+
+
+static func _is_autoplay(args: Dictionary) -> bool:
+	var ap: Variant = args.get("autoplay", false)
+	if ap is bool:
+		return ap
+	if ap is String:
+		return ap.to_lower() == "true"
+	if ap is int or ap is float:
+		return ap != 0
+	return false
 
 
 func _on_song_saved_event() -> void:
