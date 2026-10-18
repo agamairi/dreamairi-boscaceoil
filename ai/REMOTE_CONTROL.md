@@ -69,7 +69,7 @@ Upon startup, Bosca:
   followed by connection closure.
 - **Requests & Responses**:
   - `{"id": N, "op": "ping"}` → `{"id": N, "ok": true, "result": {}}`
-  - `{"id": N, "op": "shutdown"}` → `{"id": N, "ok": true, "result": {}}` and triggers graceful quit
+  - `{"id": N, "op": "shutdown"}` → `{"id": N, "ok": true, "result": {}}` and triggers graceful quit. With unsaved edits the app asks before quitting instead of closing immediately.
   - `{"id": N, "op": "tool", "name": "<tool>", "args": {...}}` → `{"id": N, "ok": true, "result": {...}}`
 - **Events** (unsolicited from Bosca, no `id`):
   - `{"event": "song_saved"}` when the song is saved in the app.

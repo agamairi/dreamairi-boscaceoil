@@ -139,6 +139,11 @@ func _on_song_saved_event() -> void:
 
 
 func _on_remote_shutdown() -> void:
+	# Ask for confirmation before quitting if there are unsaved edits so work is not lost.
+	if Controller.current_song and Controller.current_song.is_dirty():
+		Controller.io_manager.check_song_on_exit()
+		return
+
 	if _remote_control:
 		_remote_control.send_event("closing")
 	get_tree().quit()
