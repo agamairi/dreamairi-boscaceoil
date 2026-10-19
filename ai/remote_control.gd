@@ -18,6 +18,7 @@ const TRANSPORT_INTERVAL_MS: int = 66 # <= ~15/s
 const DEFAULT_TOOLS: Array[String] = [
 	"create_song",
 	"add_instrument",
+	"set_instrument",
 	"remove_instrument",
 	"create_pattern",
 	"add_notes",
@@ -45,6 +46,8 @@ const VIEWER_TOOL_ALLOWLIST: Array[String] = [
 	"create_pattern",
 	"set_arrangement",
 	"list_instruments",
+	"add_instrument",
+	"set_instrument",
 ]
 
 class ClientSlot extends RefCounted:

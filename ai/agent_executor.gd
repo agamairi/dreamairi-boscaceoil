@@ -139,6 +139,8 @@ func _refresh_ui(tool_name: String) -> void:
 		"add_instrument":
 			Controller.song_instrument_created.emit()
 			Controller.song_instrument_changed.emit()
+		"set_instrument":
+			Controller.song_instrument_changed.emit()
 		"remove_instrument":
 			Controller.song_instrument_changed.emit()
 		"create_pattern":

@@ -239,6 +239,109 @@ try:
     check("controller add_notes -> viewer song_changed then viewer get_song_state shows notes",
           res_notes.get("ok") is True and ev_sc_view2 is not None and has_note)
 
+    # 3a. Viewer add_instrument returns next index (1)
+    s_view.send({"id": 30, "op": "tool", "name": "add_instrument", "args": {
+        "category": "DRUMKIT",
+        "name": "Simple Drumkit"
+    }})
+    res_add_inst = s_view.recv_response(30)
+    ev_sc_ctrl_add = s_ctrl.wait_for_event("song_changed", timeout=4.0)
+    add_inst_ok = (res_add_inst.get("ok") is True and
+                   res_add_inst.get("result", {}).get("success") is True and
+                   res_add_inst.get("result", {}).get("instrument_index") == 1)
+    check("add_instrument as viewer returns the next index", add_inst_ok and ev_sc_ctrl_add is not None)
+
+    # 3b. Melodic -> drumkit refused
+    s_view.send({"id": 31, "op": "tool", "name": "set_instrument", "args": {
+        "instrument_index": 0,
+        "category": "DRUMKIT",
+        "name": "Simple Drumkit"
+    }})
+    res_m2d = s_view.recv_response(31)
+    check("melodic -> drumkit refused",
+          res_m2d.get("ok") is True and
+          res_m2d.get("result", {}).get("error") == "cannot switch between a drumkit and a melodic instrument; add a new instrument instead")
+
+    # 3c. Drumkit -> melodic refused
+    s_view.send({"id": 32, "op": "tool", "name": "set_instrument", "args": {
+        "instrument_index": 1,
+        "category": "MIDI",
+        "name": "Electric Piano 1"
+    }})
+    res_d2m = s_view.recv_response(32)
+    check("drumkit -> melodic refused",
+          res_d2m.get("ok") is True and
+          res_d2m.get("result", {}).get("error") == "cannot switch between a drumkit and a melodic instrument; add a new instrument instead")
+
+    # 3d. Unknown name refused
+    s_view.send({"id": 33, "op": "tool", "name": "set_instrument", "args": {
+        "instrument_index": 0,
+        "category": "MIDI",
+        "name": "NonexistentVoiceXYZ"
+    }})
+    res_unk = s_view.recv_response(33)
+    check("unknown name refused",
+          res_unk.get("ok") is True and
+          "error" in res_unk.get("result", {}) and
+          "MIDI" in res_unk.get("result", {}).get("error", ""))
+
+    # 3e. Viewer set_instrument on instrument 0 to "Electric Piano 1"
+    s_view.send({"id": 34, "op": "tool", "name": "set_instrument", "args": {
+        "instrument_index": 0,
+        "category": "MIDI",
+        "name": "Electric Piano 1"
+    }})
+    res_set_inst = s_view.recv_response(34)
+    ev_sc_ctrl_set = s_ctrl.wait_for_event("song_changed", timeout=4.0)
+    check("song_changed event reaches the controller", ev_sc_ctrl_set is not None)
+
+    s_view.send({"id": 35, "op": "tool", "name": "get_song_state", "args": {}})
+    res_state = s_view.recv_response(35)
+    state_insts = res_state.get("result", {}).get("instruments", [])
+    state_pats = res_state.get("result", {}).get("patterns", [])
+    inst0_name = state_insts[0].get("name") if len(state_insts) > 0 else ""
+    inst0_cat = state_insts[0].get("category") if len(state_insts) > 0 else ""
+    notes_preserved = any(any(n.get("note") == 60 and n.get("position") == 0 and n.get("length") == 2 for n in p.get("notes", [])) for p in state_pats if p.get("instrument_index") == 0)
+    check("viewer set_instrument on instrument 0 to Electric Piano 1 -> new voice and notes unchanged",
+          res_set_inst.get("ok") is True and
+          res_set_inst.get("result", {}).get("success") is True and
+          res_set_inst.get("result", {}).get("name") == "Electric Piano 1" and
+          inst0_name == "Electric Piano 1" and
+          inst0_cat == "MIDI" and
+          notes_preserved)
+
+    # 3f. set_instrument while playing keeps playing
+    s_view.send({"id": 36, "op": "tool", "name": "play_song", "args": {"action": "play"}})
+    s_view.recv_response(36)
+    s_view.wait_for_event("transport", timeout=3.0)
+
+    s_view.send({"id": 37, "op": "tool", "name": "get_transport", "args": {}})
+    r_tr_play1 = s_view.recv_response(37)
+    was_playing = r_tr_play1.get("result", {}).get("playing") is True
+
+    s_view.send({"id": 38, "op": "tool", "name": "set_instrument", "args": {
+        "instrument_index": 0,
+        "category": "MIDI",
+        "name": "Bright Piano"
+    }})
+    r_set_play = s_view.recv_response(38)
+
+    s_view.send({"id": 39, "op": "tool", "name": "get_transport", "args": {}})
+    r_tr_play2 = s_view.recv_response(39)
+    still_playing = r_tr_play2.get("result", {}).get("playing") is True
+
+    s_view.send({"id": 40, "op": "tool", "name": "play_song", "args": {"action": "stop"}})
+    s_view.recv_response(40)
+    s_view.wait_for_event("transport", timeout=3.0)
+    s_ctrl.drain_events(0.1)
+    s_view.drain_events(0.1)
+
+    check("set_instrument while playing keeps playing (get_transport.playing stays true)",
+          was_playing and
+          r_set_play.get("ok") is True and
+          r_set_play.get("result", {}).get("success") is True and
+          still_playing)
+
     # 4. Viewer play_song -> transport events with advancing step/bar, then stop -> playing:false
     s_view.send({"id": 4, "op": "tool", "name": "play_song", "args": {"action": "play"}})
     res_play = s_view.recv_response(4)
@@ -265,7 +368,7 @@ try:
           tr.get("bpm") == 140 and
           "bar" in tr and "step" in tr and "pattern_size" in tr)
 
-    # 6. Viewer refused save_song / create_song / shutdown
+    # 6. Viewer refused save_song / create_song / remove_instrument / shutdown
     s_view.send({"id": 7, "op": "tool", "name": "save_song", "args": {"name": "test"}})
     r_save = s_view.recv_response(7)
     save_refused = r_save.get("result", {}).get("error") == "tool not allowed for viewer"
@@ -274,11 +377,15 @@ try:
     r_create = s_view.recv_response(8)
     create_refused = r_create.get("result", {}).get("error") == "tool not allowed for viewer"
 
+    s_view.send({"id": 88, "op": "tool", "name": "remove_instrument", "args": {"instrument_index": 1}})
+    r_remove = s_view.recv_response(88)
+    remove_refused = r_remove.get("result", {}).get("error") == "tool not allowed for viewer"
+
     s_view.send({"id": 9, "op": "shutdown"})
     r_shut = s_view.recv_response(9)
     shut_refused = (not r_shut.get("ok")) and ("shutdown not allowed" in r_shut.get("error", ""))
 
-    check("viewer refused save_song / create_song / shutdown", save_refused and create_refused and shut_refused)
+    check("viewer refused save_song / create_song / remove_instrument / shutdown", save_refused and create_refused and remove_refused and shut_refused)
 
     # 7. A second viewer closed
     s_view2 = Client(port)

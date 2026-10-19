@@ -23,6 +23,8 @@ func _register_tools() -> void:
 
 		{"name": "add_instrument", "description": "Add an instrument. Returns index. Use list_instruments to find names.", "parameters": {"type": "object", "properties": {"category": {"type": "string", "description": "Category (MIDI, CHIPTUNE, DRUMKIT, etc.)"}, "name": {"type": "string", "description": "Instrument name"}}, "required": ["category", "name"]}},
 
+		{"name": "set_instrument", "description": "Replace voice of an existing instrument by index. Keeps all patterns referencing it.", "parameters": {"type": "object", "properties": {"instrument_index": {"type": "integer", "description": "Index of the instrument to update"}, "category": {"type": "string", "description": "Instrument category (MIDI, CHIPTUNE, DRUMKIT, etc.)"}, "name": {"type": "string", "description": "Instrument voice name"}}, "required": ["instrument_index", "category", "name"]}},
+
 		{"name": "remove_instrument", "description": "Remove an instrument by index.", "parameters": {"type": "object", "properties": {"instrument_index": {"type": "integer"}}, "required": ["instrument_index"]}},
 
 		{"name": "create_pattern", "description": "Create empty pattern for an instrument. Returns pattern index.", "parameters": {"type": "object", "properties": {"instrument_index": {"type": "integer"}, "key": {"type": "integer", "default": 0}, "scale": {"type": "integer", "default": 0}}, "required": ["instrument_index"]}},
@@ -52,6 +54,7 @@ func execute(tool_name: String, arguments: Dictionary) -> Dictionary:
 	match tool_name:
 		"create_song": result = _create_song(arguments)
 		"add_instrument": result = _add_instrument(arguments)
+		"set_instrument": result = _set_instrument(arguments)
 		"remove_instrument": result = _remove_instrument(arguments)
 		"create_pattern": result = _create_pattern(arguments)
 		"add_notes": result = _add_notes(arguments)
@@ -98,7 +101,7 @@ func _add_instrument(args: Dictionary) -> Dictionary:
 	var req_name: String = args.get("name", "")
 	var voice_data: VoiceManager.VoiceData = _find_voice(cat, req_name)
 	if voice_data == null:
-		return {"error": "Instrument not found: %s / %s. Use list_instruments to see available names." % [cat, req_name]}
+		return {"error": "Instrument not found in category '%s': %s. Use list_instruments to see available names." % [cat, req_name]}
 	var inst: Instrument
 	if voice_data.category == "DRUMKIT":
 		inst = DrumkitInstrument.new(voice_data)
@@ -111,7 +114,50 @@ func _add_instrument(args: Dictionary) -> Dictionary:
 	return {"success": true, "instrument_index": idx, "message": "Added '%s' (matched '%s') at index %d" % [req_name, voice_data.name, idx]}
 
 
-## Fuzzy instrument lookup: exact match → substring match → first in category.
+func _set_instrument(args: Dictionary) -> Dictionary:
+	var song := Controller.current_song
+	if not song:
+		return {"error": "No song loaded"}
+	if not args.has("instrument_index"):
+		return {"error": "Invalid instrument index"}
+	var idx: int = int(args.get("instrument_index", -1))
+	if idx < 0 or idx >= song.instruments.size():
+		return {"error": "Invalid instrument index: %d" % idx}
+
+	var cat: String = str(args.get("category", ""))
+	var req_name: String = str(args.get("name", ""))
+	var voice_data: VoiceManager.VoiceData = _find_voice(cat, req_name)
+	if voice_data == null:
+		return {"error": "Instrument not found in category '%s': %s. Use list_instruments to see available names." % [cat, req_name]}
+
+	var old_inst: Instrument = song.instruments[idx]
+	var old_is_drum: bool = (old_inst is DrumkitInstrument) or (old_inst.type == Instrument.InstrumentType.INSTRUMENT_DRUMKIT)
+	var new_is_drum: bool = (voice_data is VoiceManager.DrumkitData) or (voice_data.category == "DRUMKIT")
+	if old_is_drum != new_is_drum:
+		return {"error": "cannot switch between a drumkit and a melodic instrument; add a new instrument instead"}
+
+	var new_inst: Instrument = Controller.instance_instrument_by_voice(voice_data)
+	new_inst.volume = old_inst.volume
+	new_inst.lp_cutoff = old_inst.lp_cutoff
+	new_inst.lp_resonance = old_inst.lp_resonance
+	new_inst.update_filter()
+
+	song.instruments[idx] = new_inst
+
+	for pattern: Pattern in song.patterns:
+		if pattern.instrument_idx == idx:
+			pattern.change_instrument(idx, new_inst)
+
+	song.mark_dirty()
+	return {
+		"success": true,
+		"instrument_index": idx,
+		"category": voice_data.category,
+		"name": voice_data.name,
+	}
+
+
+## Fuzzy instrument lookup: exact match → substring match → first in category (if no name specified).
 func _find_voice(category: String, name: String) -> VoiceManager.VoiceData:
 	# 1. Exact match.
 	var exact := Controller.voice_manager.get_voice_data(category, name)
@@ -119,7 +165,7 @@ func _find_voice(category: String, name: String) -> VoiceManager.VoiceData:
 		return exact
 
 	# 2. Case-insensitive substring match across all voices in category.
-	var name_lower := name.to_lower()
+	var name_lower := name.strip_edges().to_lower()
 	var cats := Controller.voice_manager.get_categories()
 	var search_cats: Array[String] = []
 	for c: String in cats:
@@ -134,7 +180,7 @@ func _find_voice(category: String, name: String) -> VoiceManager.VoiceData:
 			for voice: VoiceManager.VoiceData in sub.voices:
 				if first_in_cat == null:
 					first_in_cat = voice
-				if voice.name.to_lower().contains(name_lower) or name_lower.contains(voice.name.to_lower()):
+				if not name_lower.is_empty() and (voice.name.to_lower().contains(name_lower) or name_lower.contains(voice.name.to_lower())):
 					best_match = voice
 					break
 			if best_match:
@@ -145,8 +191,11 @@ func _find_voice(category: String, name: String) -> VoiceManager.VoiceData:
 	if best_match:
 		return best_match
 
-	# 3. Fallback: first instrument in the category.
-	return first_in_cat
+	# 3. Fallback: first instrument in the category only if no name was specified.
+	if name_lower.is_empty():
+		return first_in_cat
+
+	return null
 
 
 func _remove_instrument(args: Dictionary) -> Dictionary:

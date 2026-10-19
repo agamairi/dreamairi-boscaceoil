@@ -132,10 +132,20 @@ Reachable via `op: "tool"` (in engine mode, playback remains stopped after start
 | `save_song` | `{"name": str}` | No | Save song to `<output_dir>/<name>.ceol` |
 | `export_song` | `{"format": "midi", "name": str}` | No | Export MIDI to `<output_dir>/<name>.mid` |
 | `remove_instrument`| `{"instrument_index": int}` | No | Remove instrument by index |
-| `add_instrument` | `{"category": str, "name": str}` | No | Add instrument by name |
+| `add_instrument` | `{"category": str, "name": str}` | Yes | Add instrument by name (capped at song max of 16) |
+| `set_instrument` | `{"instrument_index": int, "category": str, "name": str}` | Yes | Replace voice of instrument at index: `{"success": true, "instrument_index": N, "category": str, "name": str}` |
 | `set_effect` | `{"effect": int, "power": int}` | No | Configure global effect |
 
-A refused call from a viewer returns:
+### Instrument Changes
+
+- `add_instrument` adds a new instrument voice by fuzzy name lookup and assigns the next index. Allowed for viewers, but capped at the song's instrument limit (16).
+- `set_instrument` replaces the voice of the existing instrument at `instrument_index` with the voice found by fuzzy lookup (`_find_voice`), keeping every pattern and note that references that instrument. It reuses the GUI's instrument-change path (`Controller.instance_instrument_by_voice`, `pattern.change_instrument`, and `Controller.song_instrument_changed`), so the synth driver is updated immediately and playback uses the new voice without interruption (even while playing).
+  - Refuses switching between a drumkit and a melodic instrument: `{"error": "cannot switch between a drumkit and a melodic instrument; add a new instrument instead"}`.
+  - Invalid index: `{"error": "Invalid instrument index: N"}`.
+  - Unknown voice: `{"error": "Instrument not found in category '<category>': <name>. Use list_instruments to see available names."}`.
+  - On success, marks the song dirty and emits `song_instrument_changed` (broadcasting a `song_changed` event).
+
+A refused call from a viewer for unauthorized tools returns:
 ```json
 {"id": N, "ok": true, "result": {"error": "tool not allowed for viewer"}}
 ```

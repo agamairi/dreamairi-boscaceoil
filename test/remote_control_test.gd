@@ -91,7 +91,7 @@ func _run() -> void:
 		"client": "dreamairi-plugin"
 	})
 	var hello_reply: Dictionary = await _read_frame(client1)
-	check("handshake ok", hello_reply.get("ok") == true and int(hello_reply.get("protocol", 0)) == 1 and hello_reply.get("tools") is Array and hello_reply.get("export") is Array)
+	check("handshake ok", hello_reply.get("ok") == true and int(hello_reply.get("protocol", 0)) == 1 and hello_reply.get("tools") is Array and hello_reply.get("export") is Array and hello_reply.get("tools", []).has("set_instrument"))
 	
 	# Check 5: features in hello
 	var features: Array = hello_reply.get("features", [])
@@ -200,19 +200,39 @@ func _run() -> void:
 	var v_create_reply: Dictionary = await _read_response(viewer)
 	check("viewer refused create_song", v_create_reply.get("ok") == true and str(v_create_reply.get("result", {}).get("error", "")) == "tool not allowed for viewer")
 	
-	# Check 18: viewer allowlist - add_instrument refused
+	# Check 18: viewer allowlist - add_instrument allowed
 	_send_frame(viewer, {
 		"id": 14,
 		"op": "tool",
 		"name": "add_instrument",
 		"args": {"category": "MIDI", "name": "Piano"}
 	})
-	var v_inst_reply: Dictionary = await _read_response(viewer)
-	check("viewer refused add_instrument", v_inst_reply.get("ok") == true and str(v_inst_reply.get("result", {}).get("error", "")) == "tool not allowed for viewer")
+	var v_add_reply: Dictionary = await _read_response(viewer)
+	check("viewer allowed add_instrument", v_add_reply.get("ok") == true and v_add_reply.get("result", {}).get("ok") == true)
 	
-	# Check 19: viewer shutdown refused
+	# Check 19: viewer allowlist - set_instrument allowed
 	_send_frame(viewer, {
 		"id": 15,
+		"op": "tool",
+		"name": "set_instrument",
+		"args": {"instrument_index": 0, "category": "MIDI", "name": "Electric Piano 1"}
+	})
+	var v_set_reply: Dictionary = await _read_response(viewer)
+	check("viewer allowed set_instrument", v_set_reply.get("ok") == true and v_set_reply.get("result", {}).get("ok") == true)
+	
+	# Check 20: viewer allowlist - remove_instrument refused
+	_send_frame(viewer, {
+		"id": 16,
+		"op": "tool",
+		"name": "remove_instrument",
+		"args": {"instrument_index": 0}
+	})
+	var v_rem_reply: Dictionary = await _read_response(viewer)
+	check("viewer refused remove_instrument", v_rem_reply.get("ok") == true and str(v_rem_reply.get("result", {}).get("error", "")) == "tool not allowed for viewer")
+	
+	# Check 21: viewer shutdown refused
+	_send_frame(viewer, {
+		"id": 17,
 		"op": "shutdown"
 	})
 	var v_shut_reply: Dictionary = await _read_response(viewer)
