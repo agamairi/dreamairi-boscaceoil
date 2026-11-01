@@ -351,7 +351,13 @@ try:
     
     s_view.send({"id": 5, "op": "tool", "name": "play_song", "args": {"action": "stop"}})
     res_stop = s_view.recv_response(5)
-    t_stop = s_view.wait_for_event("transport", timeout=3.0)
+    t_stop = None
+    t0_stop = time.time()
+    while time.time() - t0_stop < 3.0:
+        ev = s_view.wait_for_event("transport", timeout=1.0)
+        if ev and ev.get("playing") is False:
+            t_stop = ev
+            break
     check("viewer play_song -> transport events with advancing step/bar, then stop -> playing:false",
           res_play.get("ok") is True and
           t_start is not None and t_start.get("playing") is True and
@@ -453,6 +459,21 @@ try:
     s_ctrl.drain_events(0.1)
     s_view.drain_events(0.1)
 
+    # 7b. Real app export_song with format: "wav"
+    s_ctrl.send({"id": 70, "op": "tool", "name": "export_song", "args": {"format": "wav", "name": "smoke_real_song"}})
+    r_exp_wav = s_ctrl.recv_response(70, timeout=15.0)
+    res_wav = r_exp_wav.get("result", {})
+    wav_path = res_wav.get("path", "")
+    wav_exists = os.path.isfile(wav_path)
+    wav_size = os.path.getsize(wav_path) if wav_exists else 0
+    wav_hdr = b""
+    if wav_exists:
+        with open(wav_path, "rb") as wf:
+            wav_hdr = wf.read(44)
+    has_riff = len(wav_hdr) >= 44 and wav_hdr[:4] == b"RIFF" and wav_hdr[8:12] == b"WAVE"
+    check("real app export_song wav produces valid file with non-zero size",
+          r_exp_wav.get("ok") is True and wav_exists and wav_size > 1000 and has_riff)
+
     # 8. Relay: controller answers viewer relay with relay_result and checks no-controller error
     s_view.send({"id": 10, "op": "relay", "action": "save", "args": {"prompt": "smoke test song"}})
     ev_relay = s_ctrl.wait_for_event("relay_request", timeout=3.0)
@@ -488,6 +509,11 @@ except Exception as ex:
     print(f"Exception during smoke test: {ex}", file=sys.stderr)
     import traceback
     traceback.print_exc()
+    if os.path.exists(log_path):
+        with open(log_path) as lf:
+            print("=== APP LOG ===")
+            print(lf.read())
+            print("===============")
 
 finally:
     cleanup()

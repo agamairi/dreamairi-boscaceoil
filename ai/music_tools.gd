@@ -63,7 +63,7 @@ func execute(tool_name: String, arguments: Dictionary) -> Dictionary:
 		"set_effect": result = _set_effect(arguments)
 		"get_song_state": result = _get_song_state(arguments)
 		"play_song": result = _play_song(arguments)
-		"export_song": result = _export_song(arguments)
+		"export_song": result = await _export_song(arguments)
 		"list_instruments": result = _list_instruments(arguments)
 		"snapshot": result = _snapshot(arguments)
 		"load_song": result = _load_song(arguments)
@@ -387,9 +387,73 @@ func _export_song(args: Dictionary) -> Dictionary:
 			"sha256": sha256,
 		}
 	elif format == "wav":
-		return {"error": "WAV export through remote control is not implemented; use File > Export > WAV in the app"}
+		var file_name: String = name
+		if not file_name.ends_with(".wav"):
+			file_name += ".wav"
+		var target_path: String = output_dir.path_join(file_name)
+		
+		var loop_start: int = song.arrangement.loop_start
+		var loop_end: int = song.arrangement.loop_end
+		var loop_bars: int = loop_end - loop_start
+		if loop_bars <= 0:
+			return {"error": "Invalid loop range: %d to %d" % [loop_start, loop_end]}
+		
+		var total_steps: int = loop_bars * song.pattern_size
+		var est_duration_sec: float = total_steps * (15.0 / float(maxi(1, song.bpm)))
+		if est_duration_sec > 600.0:
+			return {"error": "Song duration exceeds 10 minute limit (%.1f seconds)" % est_duration_sec}
+		
+		if Controller.music_player.is_exporting():
+			return {"error": "Export already in progress"}
+		
+		var exporter := WavExporter.new()
+		var path_valid := exporter.set_export_path(target_path)
+		if not path_valid:
+			return {"error": "Failed to open export path for writing: %s" % target_path}
+		
+		Controller.lock_song_editing("NOW EXPORTING AS WAV, PLEASE WAIT")
+		
+		song.arrangement.set_loop(loop_start, loop_end)
+		song.reset_arrangement()
+		
+		var stream_cb := func(event: SiONEvent) -> void:
+			exporter.append_data(event.get_stream_buffer())
+		
+		var state := {"ended": false}
+		var on_ended := func() -> void:
+			state["ended"] = true
+		Controller.music_player.export_ended.connect(on_ended, CONNECT_ONE_SHOT)
+		Controller.music_player.start_exporting(stream_cb)
+		
+		var max_wait_sec: float = est_duration_sec + 20.0
+		var start_ticks := Time.get_ticks_msec()
+		var timeout_ticks := int(max_wait_sec * 1000.0)
+		while not state["ended"]:
+			if Time.get_ticks_msec() - start_ticks > timeout_ticks:
+				break
+			await Controller.get_tree().process_frame
+		
+		if not state["ended"]:
+			if Controller.music_player.export_ended.is_connected(on_ended):
+				Controller.music_player.export_ended.disconnect(on_ended)
+			Controller.music_player.cancel_exporting()
+			Controller.unlock_song_editing()
+			return {"error": "WAV export timed out"}
+		
+		var ok: bool = exporter.save()
+		Controller.unlock_song_editing()
+		if not ok:
+			return {"error": "Failed to save WAV to %s" % target_path}
+		
+		var file_bytes: PackedByteArray = FileAccess.get_file_as_bytes(target_path)
+		var sha256: String = FileAccess.get_sha256(target_path)
+		return {
+			"path": target_path,
+			"bytes": file_bytes.size(),
+			"sha256": sha256,
+		}
 	else:
-		return {"error": "Unsupported export format: %s (supported: midi)" % format}
+		return {"error": "Unsupported export format: %s (supported: midi, wav)" % format}
 
 
 func _snapshot(_args: Dictionary) -> Dictionary:

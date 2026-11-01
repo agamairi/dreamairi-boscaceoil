@@ -152,7 +152,7 @@ func _init_remote_control() -> void:
 
 
 func _execute_remote_tool(tool_name: String, args: Dictionary) -> Dictionary:
-	var result: Dictionary = _remote_music_tools.execute(tool_name, args)
+	var result: Dictionary = await _remote_music_tools.execute(tool_name, args)
 	if not result.has("error"):
 		if (tool_name == "create_song" or tool_name == "load_song") and not _is_autoplay(args):
 			if Controller.music_player:

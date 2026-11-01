@@ -8,6 +8,7 @@ var checks: int = 0
 var passed: int = 0
 var fake_executor_calls: Array[Dictionary] = []
 var shutdown_signal_fired: bool = false
+var test_tmp_dir: String = ""
 var _client_buffers: Dictionary = {}
 
 
@@ -22,7 +23,81 @@ func fake_executor(tool_name: String, args: Dictionary) -> Dictionary:
 		return {"executed": true, "received_arg": v * 2}
 	elif tool_name == "play_song":
 		return {"success": true, "action": args.get("action", "play")}
+	elif tool_name == "export_song":
+		await _wait_frames(2)
+		var format: String = str(args.get("format", "")).to_lower()
+		var name: String = str(args.get("name", "test_song"))
+		if not name.ends_with("." + format):
+			name += "." + format
+		var target_path: String = test_tmp_dir.path_join(name)
+		if format == "wav":
+			_write_test_wav_file(target_path, 2.0)
+			var file_bytes: PackedByteArray = FileAccess.get_file_as_bytes(target_path)
+			var sha256: String = FileAccess.get_sha256(target_path)
+			return {
+				"path": target_path,
+				"bytes": file_bytes.size(),
+				"sha256": sha256,
+			}
+		return {"error": "unsupported format"}
 	return {"ok": true}
+
+
+func _write_test_wav_file(path: String, duration_sec: float) -> void:
+	var sample_rate: int = 44100
+	var channels: int = 2
+	var bits_per_sample: int = 16
+	var num_frames: int = int(sample_rate * duration_sec)
+	var data_size: int = num_frames * channels * (bits_per_sample / 8)
+	
+	var wav := PackedByteArray()
+	wav.resize(44 + data_size)
+	
+	# "RIFF"
+	wav.encode_u8(0, 82)
+	wav.encode_u8(1, 73)
+	wav.encode_u8(2, 70)
+	wav.encode_u8(3, 70)
+	wav.encode_u32(4, 36 + data_size)
+	# "WAVE"
+	wav.encode_u8(8, 87)
+	wav.encode_u8(9, 65)
+	wav.encode_u8(10, 86)
+	wav.encode_u8(11, 69)
+	# "fmt "
+	wav.encode_u8(12, 102)
+	wav.encode_u8(13, 109)
+	wav.encode_u8(14, 116)
+	wav.encode_u8(15, 32)
+	wav.encode_u32(16, 16)
+	wav.encode_u16(20, 1) # PCM
+	wav.encode_u16(22, channels)
+	wav.encode_u32(24, sample_rate)
+	var byte_rate: int = sample_rate * channels * (bits_per_sample / 8)
+	wav.encode_u32(28, byte_rate)
+	var block_align: int = channels * (bits_per_sample / 8)
+	wav.encode_u16(32, block_align)
+	wav.encode_u16(34, bits_per_sample)
+	# "data"
+	wav.encode_u8(36, 100)
+	wav.encode_u8(37, 97)
+	wav.encode_u8(38, 116)
+	wav.encode_u8(39, 97)
+	wav.encode_u32(40, data_size)
+	
+	var offset := 44
+	for i in range(num_frames):
+		var t: float = float(i) / float(sample_rate)
+		var s: float = sin(t * 440.0 * TAU)
+		var val: int = int(s * 16000.0)
+		wav.encode_s16(offset, val)
+		wav.encode_s16(offset + 2, val)
+		offset += 4
+	
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f != null:
+		f.store_buffer(wav)
+		f.close()
 
 
 func check(description: String, condition: bool) -> void:
@@ -39,6 +114,7 @@ func _run() -> void:
 	print("Starting remote_control_test...")
 	
 	var tmp_dir: String = "/tmp/rc_test_%d_%d" % [OS.get_process_id(), Time.get_ticks_msec()]
+	test_tmp_dir = tmp_dir
 	var make_err: Error = DirAccess.make_dir_recursive_absolute(tmp_dir)
 	if make_err != OK:
 		printerr("Failed to create tmp dir: %s" % tmp_dir)
@@ -97,8 +173,8 @@ func _run() -> void:
 	var features: Array = hello_reply.get("features", [])
 	check("features in hello", features.has("viewer") and features.has("relay") and features.has("transport"))
 	
-	# Check 6: default hello advertises exactly ["midi"]
-	check("default hello advertises exactly [\"midi\"]", hello_reply.get("export") == ["midi"])
+	# Check 6: default hello advertises ["midi", "wav"]
+	check("default hello advertises [\"midi\", \"wav\"]", hello_reply.get("export") == ["midi", "wav"])
 	
 	# Check 7: ping
 	_send_frame(client1, {"id": 1, "op": "ping"})
@@ -115,6 +191,60 @@ func _run() -> void:
 	var tool_reply: Dictionary = await _read_response(client1)
 	var tool_res: Dictionary = tool_reply.get("result", {})
 	check("tool round-trip through the executor", int(tool_reply.get("id", 0)) == 2 and tool_reply.get("ok") == true and tool_res.get("executed") == true and int(tool_res.get("received_arg", 0)) == 42)
+	
+	# Check 8b: WAV export tool round-trip and audio validation
+	_send_frame(client1, {
+		"id": 50,
+		"op": "tool",
+		"name": "export_song",
+		"args": {"format": "wav", "name": "test_export"}
+	})
+	var exp_reply: Dictionary = await _read_response(client1)
+	var exp_res: Dictionary = exp_reply.get("result", {})
+	var exp_path: String = str(exp_res.get("path", ""))
+	check("export_song wav tool returns ok with path", int(exp_reply.get("id", 0)) == 50 and exp_reply.get("ok") == true and exp_path != "" and exp_path.ends_with(".wav"))
+	check("export_song wav file exists on disk", FileAccess.file_exists(exp_path))
+	
+	var wav_f := FileAccess.open(exp_path, FileAccess.READ)
+	var wav_data := wav_f.get_buffer(wav_f.get_length()) if wav_f else PackedByteArray()
+	if wav_f:
+		wav_f.close()
+	
+	var is_riff := wav_data.slice(0, 4).get_string_from_ascii() == "RIFF"
+	var is_wave := wav_data.slice(8, 12).get_string_from_ascii() == "WAVE"
+	var is_fmt := wav_data.slice(12, 16).get_string_from_ascii() == "fmt "
+	check("export_song wav has valid RIFF/WAVE header", is_riff and is_wave and is_fmt)
+	
+	var wav_audio_fmt: int = wav_data.decode_u16(20) if wav_data.size() >= 36 else 0
+	var wav_chans: int = wav_data.decode_u16(22) if wav_data.size() >= 36 else 0
+	var wav_rate: int = wav_data.decode_u32(24) if wav_data.size() >= 36 else 0
+	var wav_bits: int = wav_data.decode_u16(34) if wav_data.size() >= 36 else 0
+	check("export_song wav format chunk is PCM 16-bit 44.1kHz", wav_audio_fmt == 1 and wav_chans == 2 and wav_rate == 44100 and wav_bits == 16)
+	
+	var data_chunk_pos := 12
+	var found_data := false
+	var data_len := 0
+	while data_chunk_pos + 8 <= wav_data.size():
+		var tag := wav_data.slice(data_chunk_pos, data_chunk_pos + 4).get_string_from_ascii()
+		var clen := wav_data.decode_u32(data_chunk_pos + 4)
+		if tag == "data":
+			found_data = true
+			data_len = clen
+			data_chunk_pos += 8
+			break
+		data_chunk_pos += 8 + clen
+	
+	check("export_song wav has non-zero data chunk", found_data and data_len > 0)
+	
+	var bytes_per_sec := float(wav_rate * wav_chans * (wav_bits / 8))
+	var dur := float(data_len) / bytes_per_sec
+	check("export_song wav duration roughly matches song length (approx 2.0s)", dur >= 1.5 and dur <= 2.5)
+	
+	var non_silent_samples := 0
+	for i in range(data_chunk_pos, mini(wav_data.size(), data_chunk_pos + data_len), 2):
+		if wav_data.decode_s16(i) != 0:
+			non_silent_samples += 1
+	check("export_song wav audio is not all silence", non_silent_samples > 100)
 	
 	# Check 9: viewer connected with viewer_secret
 	var viewer: StreamPeerTCP = await _connect_client(port)
@@ -452,7 +582,7 @@ func _run() -> void:
 		"output_dir": tmp_dir,
 		"ready_file": custom_ready_path,
 	}
-	var custom_server: Node = server_script.new(custom_handoff, fake_executor, [], ["midi", "wav"])
+	var custom_server: Node = server_script.new(custom_handoff, fake_executor, [], ["midi"])
 	custom_server.hello_timeout_ms = 400
 	root.add_child(custom_server)
 	await process_frame
@@ -461,7 +591,7 @@ func _run() -> void:
 	var custom_client: StreamPeerTCP = await _connect_client(custom_port)
 	check("custom_export client connected", custom_client != null and custom_client.get_status() == StreamPeerTCP.STATUS_CONNECTED)
 	
-	# Check 35: custom_export server advertises both ["midi", "wav"]
+	# Check 35: custom_export server advertises overridden ["midi"]
 	_send_frame(custom_client, {
 		"op": "hello",
 		"protocol": 1,
@@ -469,7 +599,7 @@ func _run() -> void:
 		"client": "dreamairi-plugin"
 	})
 	var custom_hello_reply: Dictionary = await _read_frame(custom_client)
-	check("custom_export server advertises [\"midi\", \"wav\"]", custom_hello_reply.get("ok") == true and custom_hello_reply.get("export") == ["midi", "wav"])
+	check("custom_export server advertises [\"midi\"] override", custom_hello_reply.get("ok") == true and custom_hello_reply.get("export") == ["midi"])
 	
 	custom_client.disconnect_from_host()
 	await _wait_frames(3)

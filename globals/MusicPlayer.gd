@@ -82,6 +82,8 @@ func reset_driver() -> void:
 	# to supply the stream with new notes to play based on the composition of the current song.
 	
 	_driver.stop()
+	_driver.set_beat_callback_interval(1)
+	_driver.set_timer_interval(NOTE_LENGTH)
 
 	update_driver_bpm()
 	_driver.stream()
@@ -404,10 +406,30 @@ func _stop_exporting() -> void:
 	_playing_residue = false
 	
 	stop_playback()
-	_driver.set_stream_event_enabled(false)
-	_driver.streaming.disconnect(_exporting_callback)
+	if _driver:
+		_driver.set_stream_event_enabled(false)
+		if _exporting_callback.is_valid() and _driver.streaming.is_connected(_exporting_callback):
+			_driver.streaming.disconnect(_exporting_callback)
 	
 	export_ended.emit()
+
+
+func is_exporting() -> bool:
+	return _music_exporting
+
+
+func cancel_exporting() -> void:
+	if not _music_exporting:
+		return
+	
+	_music_exporting = false
+	_playing_residue = false
+	
+	stop_playback()
+	if _driver:
+		_driver.set_stream_event_enabled(false)
+		if _exporting_callback.is_valid() and _driver.streaming.is_connected(_exporting_callback):
+			_driver.streaming.disconnect(_exporting_callback)
 
 
 func is_playing_residue() -> bool:

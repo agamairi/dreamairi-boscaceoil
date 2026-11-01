@@ -1,8 +1,7 @@
 ## Loopback TCP server allowing external processes (such as the DreamAiri Godot
 ## editor plugin) to drive the live composition over a framed JSON protocol.
 ##
-## Note on export formats: export_formats defaults to ["midi"] only. Remote WAV
-## rendering is not supported and must be done by the user via File > Export in the app.
+## Note on export formats: export_formats defaults to ["midi", "wav"].
 class_name RemoteControl extends Node
 
 signal shutdown_requested()
@@ -57,6 +56,7 @@ class ClientSlot extends RefCounted:
 	var expected_frame_len: int = -1
 	var connected_time_ms: int = 0
 	var hello_received: bool = false
+	var busy: bool = false
 	
 	func is_peer_connected() -> bool:
 		return peer != null and peer.get_status() == StreamPeerTCP.STATUS_CONNECTED
@@ -65,7 +65,7 @@ var bind_address: String = "127.0.0.1"
 var hello_timeout_ms: int = DEFAULT_HELLO_TIMEOUT_MS
 var relay_timeout_ms: int = RELAY_TIMEOUT_MS
 var tools: Array = []
-## Advertised export formats. Defaults to ["midi"] always; WAV export is not supported remotely.
+## Advertised export formats. Defaults to ["midi", "wav"] always.
 var export_formats: Array = []
 
 var _server: TCPServer = null
@@ -124,7 +124,7 @@ func _init(handoff: Dictionary = {}, executor: Callable = Callable(), custom_too
 	if not custom_export.is_empty():
 		export_formats = custom_export.duplicate()
 	else:
-		export_formats = ["midi"]
+		export_formats = ["midi", "wav"]
 	
 	_server = TCPServer.new()
 
@@ -291,7 +291,10 @@ func _poll_slot(slot: ClientSlot) -> void:
 		if chunk.size() > 0:
 			slot.rx_buffer.append_array(chunk)
 	
-	while slot.peer != null:
+	if slot.busy:
+		return
+	
+	while slot.peer != null and not slot.busy:
 		if slot.expected_frame_len < 0:
 			if slot.rx_buffer.size() < 4:
 				break
@@ -370,20 +373,8 @@ func _handle_frame_for_slot(slot: ClientSlot, frame: Dictionary) -> void:
 			if frame.get("args") is Dictionary:
 				args = frame.get("args")
 			
-			var result: Dictionary = {}
-			if _executor.is_valid():
-				var exec_res: Variant = _executor.call(tool_name, args)
-				if exec_res is Dictionary:
-					result = exec_res
-				else:
-					result = {"error": "Invalid executor response"}
-			else:
-				result = {"error": "No executor configured"}
-			
-			var reply: Dictionary = {"ok": true, "result": result}
-			if req_id != null:
-				reply["id"] = req_id
-			_send_slot_frame(slot, reply)
+			slot.busy = true
+			Callable(self, "_execute_tool_async").call_deferred(slot, req_id, tool_name, args)
 		
 		"relay":
 			var action: String = str(frame.get("action", ""))
@@ -541,6 +532,7 @@ func _send_slot_frame(slot: ClientSlot, dict: Dictionary) -> Error:
 func _close_slot(slot: ClientSlot, _reason: String = "") -> void:
 	var was_authenticated: bool = slot.hello_received
 	slot.hello_received = false
+	slot.busy = false
 	
 	if slot.peer != null:
 		slot.peer.disconnect_from_host()
@@ -559,6 +551,25 @@ func _close_slot(slot: ClientSlot, _reason: String = "") -> void:
 			client_disconnected.emit()
 	else:
 		_pending_clients.erase(slot)
+
+
+func _execute_tool_async(slot: ClientSlot, req_id: Variant, tool_name: String, args: Dictionary) -> void:
+	var result: Dictionary = {}
+	if _executor.is_valid():
+		var exec_res: Variant = await _executor.call(tool_name, args)
+		if exec_res is Dictionary:
+			result = exec_res
+		else:
+			result = {"error": "Invalid executor response"}
+	else:
+		result = {"error": "No executor configured"}
+	
+	slot.busy = false
+	if slot != null and slot.is_peer_connected():
+		var reply: Dictionary = {"ok": true, "result": result}
+		if req_id != null:
+			reply["id"] = req_id
+		_send_slot_frame(slot, reply)
 
 
 func _check_relay_timeouts() -> void:

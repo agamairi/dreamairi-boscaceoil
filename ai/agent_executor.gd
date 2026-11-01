@@ -106,7 +106,7 @@ func _run_agent_loop() -> void:
 			var tool_id: String = tc.get("id", "")
 
 			step_started.emit(current_turn, "Tool: %s" % tool_name)
-			var result := music_tools.execute(tool_name, tool_args)
+			var result: Dictionary = await music_tools.execute(tool_name, tool_args)
 			tool_called.emit(tool_name, tool_args, result)
 			_has_called_tools = true
 

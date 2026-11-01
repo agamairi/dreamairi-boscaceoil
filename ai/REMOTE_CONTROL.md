@@ -80,7 +80,7 @@ Roles are determined strictly by secret matching, never by client claim. A missi
     "protocol": 1,
     "app_version": "1.0",
     "tools": [...],
-    "export": ["midi"],
+    "export": ["midi", "wav"],
     "features": ["viewer", "relay", "transport"]
   }
   ```
@@ -130,7 +130,7 @@ Reachable via `op: "tool"` (in engine mode, playback remains stopped after start
 | `load_song` | `{"ceol": str}` | No | Parse and load song from ceol text |
 | `snapshot` | `{}` | No | Snapshot song state, ceol text, and MIDI base64 |
 | `save_song` | `{"name": str}` | No | Save song to `<output_dir>/<name>.ceol` |
-| `export_song` | `{"format": "midi", "name": str}` | No | Export MIDI to `<output_dir>/<name>.mid` |
+| `export_song` | `{"format": "midi" \| "wav", "name": str}` | No | Export song to `<output_dir>/<name>.<ext>` (`format: "wav"` renders offline PCM WAV audio; `"midi"` writes MIDI sequence) |
 | `remove_instrument`| `{"instrument_index": int}` | No | Remove instrument by index |
 | `add_instrument` | `{"category": str, "name": str}` | Yes | Add instrument by name (capped at song max of 16) |
 | `set_instrument` | `{"instrument_index": int, "category": str, "name": str}` | Yes | Replace voice of instrument at index: `{"success": true, "instrument_index": N, "category": str, "name": str}` |
