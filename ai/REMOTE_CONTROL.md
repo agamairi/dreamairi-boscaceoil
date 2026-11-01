@@ -130,7 +130,7 @@ Reachable via `op: "tool"` (in engine mode, playback remains stopped after start
 | `load_song` | `{"ceol": str}` | No | Parse and load song from ceol text |
 | `snapshot` | `{}` | No | Snapshot song state, ceol text, and MIDI base64 |
 | `save_song` | `{"name": str}` | No | Save song to `<output_dir>/<name>.ceol` |
-| `export_song` | `{"format": "midi" \| "wav", "name": str}` | No | Export song to `<output_dir>/<name>.<ext>` (`format: "wav"` renders offline PCM WAV audio; `"midi"` writes MIDI sequence) |
+| `export_song` | `{"format": "midi" \| "wav", "name": str, "loop_start": int?, "loop_end": int?}` | No | Export song to `<output_dir>/<name>.<ext>` (`format: "wav"` renders offline PCM WAV audio; `"midi"` writes MIDI sequence; by default exports the whole song: bars `0 .. timeline_length`; optional `loop_start` and `loop_end` specify a sub-range) |
 | `remove_instrument`| `{"instrument_index": int}` | No | Remove instrument by index |
 | `add_instrument` | `{"category": str, "name": str}` | Yes | Add instrument by name (capped at song max of 16) |
 | `set_instrument` | `{"instrument_index": int, "category": str, "name": str}` | Yes | Replace voice of instrument at index: `{"success": true, "instrument_index": N, "category": str, "name": str}` |
@@ -144,6 +144,14 @@ Reachable via `op: "tool"` (in engine mode, playback remains stopped after start
   - Invalid index: `{"error": "Invalid instrument index: N"}`.
   - Unknown voice: `{"error": "Instrument not found in category '<category>': <name>. Use list_instruments to see available names."}`.
   - On success, marks the song dirty and emits `song_instrument_changed` (broadcasting a `song_changed` event).
+
+### Song Export
+
+- `export_song` supports `wav` and `midi` formats.
+- By default, it renders the entire song arrangement: bars `0 .. timeline_length`.
+- Optional integer arguments `loop_start` and `loop_end` (bars) export a sub-range (`0 <= loop_start < loop_end <= timeline_length`). Whole-number floats (such as `3.0`) are accepted; fractional numbers or invalid ranges are rejected with an error.
+- For `wav` export, playback is stopped first (resetting playback position and arrangement) so rendering starts from the beginning of the export range.
+- The arrangement's original loop range is restored after export completes.
 
 A refused call from a viewer for unauthorized tools returns:
 ```json

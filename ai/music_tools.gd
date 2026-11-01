@@ -41,7 +41,7 @@ func _register_tools() -> void:
 
 		{"name": "play_song", "description": "Start or stop playback.", "parameters": {"type": "object", "properties": {"action": {"type": "string", "enum": ["play", "stop"]}}, "required": ["action"]}},
 
-		{"name": "export_song", "description": "Export to wav or midi.", "parameters": {"type": "object", "properties": {"format": {"type": "string", "enum": ["wav", "midi"]}, "filename": {"type": "string"}}, "required": ["format"]}},
+		{"name": "export_song", "description": "Export to wav or midi. By default renders the whole song (bars 0..timeline_length). Optional loop_start and loop_end restrict export to a bar range.", "parameters": {"type": "object", "properties": {"format": {"type": "string", "enum": ["wav", "midi"]}, "name": {"type": "string", "description": "Output filename (without or with extension)"}, "filename": {"type": "string", "description": "Alias for name"}, "loop_start": {"type": "integer", "description": "Start bar (0-based, optional; defaults to 0)"}, "loop_end": {"type": "integer", "description": "End bar (1-based exclusive, optional; defaults to timeline_length)"}}, "required": ["format"]}},
 
 		{"name": "list_instruments", "description": "List available instruments, optionally filtered by category.", "parameters": {"type": "object", "properties": {"category": {"type": "string"}}, "required": []}},
 	]
@@ -338,7 +338,20 @@ func _get_song_state(_args: Dictionary) -> Dictionary:
 			if pi >= 0:
 				arr.push_back({"bar": bar, "channel": ch, "pattern_index": pi})
 
-	return {"success": true, "message": "%d instruments, %d patterns, %d arrangement entries" % [insts.size(), pats.size(), arr.size()], "bpm": song.bpm, "pattern_size": song.pattern_size, "instruments": insts, "patterns": pats, "arrangement": arr, "global_effect": song.global_effect, "global_effect_power": song.global_effect_power}
+	return {
+		"success": true,
+		"message": "%d instruments, %d patterns, %d arrangement entries" % [insts.size(), pats.size(), arr.size()],
+		"bpm": song.bpm,
+		"pattern_size": song.pattern_size,
+		"timeline_length": song.arrangement.timeline_length,
+		"loop_start": song.arrangement.loop_start,
+		"loop_end": song.arrangement.loop_end,
+		"instruments": insts,
+		"patterns": pats,
+		"arrangement": arr,
+		"global_effect": song.global_effect,
+		"global_effect_power": song.global_effect_power
+	}
 
 
 func _play_song(args: Dictionary) -> Dictionary:
@@ -360,9 +373,40 @@ func _export_song(args: Dictionary) -> Dictionary:
 		return {"error": "No song loaded"}
 	
 	var format: String = str(args.get("format", "")).to_lower()
-	var name: String = str(args.get("name", ""))
+	var name: String = str(args.get("name", args.get("filename", "")))
 	if not _is_valid_filename(name):
 		return {"error": "Invalid name: %s" % name}
+	
+	var timeline_len: int = song.arrangement.timeline_length
+	var loop_start: int = 0
+	var loop_end: int = timeline_len
+	
+	if args.has("loop_start"):
+		var raw_start: Variant = args.get("loop_start")
+		if typeof(raw_start) == TYPE_INT:
+			loop_start = int(raw_start)
+		elif typeof(raw_start) == TYPE_FLOAT:
+			var f_start: float = float(raw_start)
+			if not is_finite(f_start) or floorf(f_start) != f_start:
+				return {"error": "Invalid loop_start: %s (must be an integer)" % str(raw_start)}
+			loop_start = int(f_start)
+		else:
+			return {"error": "Invalid loop_start: %s (must be an integer)" % str(raw_start)}
+	
+	if args.has("loop_end"):
+		var raw_end: Variant = args.get("loop_end")
+		if typeof(raw_end) == TYPE_INT:
+			loop_end = int(raw_end)
+		elif typeof(raw_end) == TYPE_FLOAT:
+			var f_end: float = float(raw_end)
+			if not is_finite(f_end) or floorf(f_end) != f_end:
+				return {"error": "Invalid loop_end: %s (must be an integer)" % str(raw_end)}
+			loop_end = int(f_end)
+		else:
+			return {"error": "Invalid loop_end: %s (must be an integer)" % str(raw_end)}
+	
+	if loop_start < 0 or loop_start >= loop_end or loop_end > timeline_len:
+		return {"error": "Invalid loop range: %d to %d (timeline length: %d)" % [loop_start, loop_end, timeline_len]}
 	
 	if format == "midi" or format == "mid":
 		var file_name: String = name
@@ -372,8 +416,8 @@ func _export_song(args: Dictionary) -> Dictionary:
 		
 		var export_config := ExportMasterPopup.ExportConfig.new()
 		export_config.type = ExportMasterPopup.ExportType.EXPORT_MIDI
-		export_config.loop_start = song.arrangement.loop_start
-		export_config.loop_end = song.arrangement.loop_end
+		export_config.loop_start = loop_start
+		export_config.loop_end = loop_end
 		
 		var ok: bool = MidiExporter.save(song, target_path, export_config)
 		if not ok:
@@ -387,17 +431,15 @@ func _export_song(args: Dictionary) -> Dictionary:
 			"sha256": sha256,
 		}
 	elif format == "wav":
+		if Controller.music_player.is_playing() or not Controller.music_player.is_stopped():
+			Controller.music_player.stop_playback()
+		
 		var file_name: String = name
 		if not file_name.ends_with(".wav"):
 			file_name += ".wav"
 		var target_path: String = output_dir.path_join(file_name)
 		
-		var loop_start: int = song.arrangement.loop_start
-		var loop_end: int = song.arrangement.loop_end
 		var loop_bars: int = loop_end - loop_start
-		if loop_bars <= 0:
-			return {"error": "Invalid loop range: %d to %d" % [loop_start, loop_end]}
-		
 		var total_steps: int = loop_bars * song.pattern_size
 		var est_duration_sec: float = total_steps * (15.0 / float(maxi(1, song.bpm)))
 		if est_duration_sec > 600.0:
@@ -407,9 +449,12 @@ func _export_song(args: Dictionary) -> Dictionary:
 			return {"error": "Export already in progress"}
 		
 		var exporter := WavExporter.new()
-		var path_valid := exporter.set_export_path(target_path)
+		var path_valid: bool = exporter.set_export_path(target_path)
 		if not path_valid:
 			return {"error": "Failed to open export path for writing: %s" % target_path}
+		
+		var prev_loop_start: int = song.arrangement.loop_start
+		var prev_loop_end: int = song.arrangement.loop_end
 		
 		Controller.lock_song_editing("NOW EXPORTING AS WAV, PLEASE WAIT")
 		
@@ -426,8 +471,8 @@ func _export_song(args: Dictionary) -> Dictionary:
 		Controller.music_player.start_exporting(stream_cb)
 		
 		var max_wait_sec: float = est_duration_sec + 20.0
-		var start_ticks := Time.get_ticks_msec()
-		var timeout_ticks := int(max_wait_sec * 1000.0)
+		var start_ticks: int = Time.get_ticks_msec()
+		var timeout_ticks: int = int(max_wait_sec * 1000.0)
 		while not state["ended"]:
 			if Time.get_ticks_msec() - start_ticks > timeout_ticks:
 				break
@@ -437,10 +482,14 @@ func _export_song(args: Dictionary) -> Dictionary:
 			if Controller.music_player.export_ended.is_connected(on_ended):
 				Controller.music_player.export_ended.disconnect(on_ended)
 			Controller.music_player.cancel_exporting()
+			song.arrangement.set_loop(prev_loop_start, prev_loop_end)
+			song.reset_arrangement()
 			Controller.unlock_song_editing()
 			return {"error": "WAV export timed out"}
 		
 		var ok: bool = exporter.save()
+		song.arrangement.set_loop(prev_loop_start, prev_loop_end)
+		song.reset_arrangement()
 		Controller.unlock_song_editing()
 		if not ok:
 			return {"error": "Failed to save WAV to %s" % target_path}
@@ -582,9 +631,13 @@ func _get_transport(_args: Dictionary) -> Dictionary:
 	
 	var bar: int = 0
 	var timeline_len: int = 1
+	var loop_start: int = 0
+	var loop_end: int = 1
 	if song.arrangement:
 		bar = song.arrangement.current_bar_idx
 		timeline_len = song.arrangement.timeline_length
+		loop_start = song.arrangement.loop_start
+		loop_end = song.arrangement.loop_end
 	
 	return {
 		"playing": is_playing,
@@ -592,6 +645,8 @@ func _get_transport(_args: Dictionary) -> Dictionary:
 		"step": step,
 		"pattern_size": song.pattern_size,
 		"timeline_length": timeline_len,
+		"loop_start": loop_start,
+		"loop_end": loop_end,
 		"bpm": song.bpm,
 	}
 

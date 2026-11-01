@@ -31,13 +31,20 @@ func fake_executor(tool_name: String, args: Dictionary) -> Dictionary:
 			name += "." + format
 		var target_path: String = test_tmp_dir.path_join(name)
 		if format == "wav":
-			_write_test_wav_file(target_path, 2.0)
+			var dur: float = 2.0
+			if args.has("loop_start") and args.has("loop_end"):
+				var ls: float = float(args.get("loop_start"))
+				var le: float = float(args.get("loop_end"))
+				dur = maxf(0.5, (le - ls) * 1.0)
+			_write_test_wav_file(target_path, dur)
 			var file_bytes: PackedByteArray = FileAccess.get_file_as_bytes(target_path)
 			var sha256: String = FileAccess.get_sha256(target_path)
 			return {
 				"path": target_path,
 				"bytes": file_bytes.size(),
 				"sha256": sha256,
+				"loop_start": args.get("loop_start"),
+				"loop_end": args.get("loop_end"),
 			}
 		return {"error": "unsupported format"}
 	return {"ok": true}
@@ -245,6 +252,17 @@ func _run() -> void:
 		if wav_data.decode_s16(i) != 0:
 			non_silent_samples += 1
 	check("export_song wav audio is not all silence", non_silent_samples > 100)
+	
+	# Check 8c: WAV sub-range export tool round-trip
+	_send_frame(client1, {
+		"id": 51,
+		"op": "tool",
+		"name": "export_song",
+		"args": {"format": "wav", "name": "test_export_sub", "loop_start": 1, "loop_end": 3}
+	})
+	var exp_sub_reply: Dictionary = await _read_response(client1)
+	var exp_sub_res: Dictionary = exp_sub_reply.get("result", {})
+	check("export_song wav tool handles sub-range loop_start/loop_end", int(exp_sub_reply.get("id", 0)) == 51 and exp_sub_reply.get("ok") == true and int(exp_sub_res.get("loop_start", -1)) == 1 and int(exp_sub_res.get("loop_end", -1)) == 3)
 	
 	# Check 9: viewer connected with viewer_secret
 	var viewer: StreamPeerTCP = await _connect_client(port)

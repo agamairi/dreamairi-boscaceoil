@@ -180,6 +180,35 @@ class Client:
         except Exception:
             pass
 
+def parse_wav_info(path):
+    if not os.path.isfile(path):
+        return {}, 0.0, b""
+    with open(path, "rb") as f:
+        data = f.read()
+    if len(data) < 44 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        return {}, 0.0, b""
+    pos = 12
+    fmt = {}
+    audio_data = b""
+    while pos + 8 <= len(data):
+        chunk_id = data[pos:pos+4]
+        chunk_size = struct.unpack("<I", data[pos+4:pos+8])[0]
+        pos += 8
+        if chunk_id == b"fmt ":
+            fmt["audio_format"] = struct.unpack("<H", data[pos:pos+2])[0]
+            fmt["channels"] = struct.unpack("<H", data[pos+2:pos+4])[0]
+            fmt["sample_rate"] = struct.unpack("<I", data[pos+4:pos+8])[0]
+            fmt["byte_rate"] = struct.unpack("<I", data[pos+8:pos+12])[0]
+            fmt["block_align"] = struct.unpack("<H", data[pos+12:pos+14])[0]
+            fmt["bits_per_sample"] = struct.unpack("<H", data[pos+14:pos+16])[0]
+        elif chunk_id == b"data":
+            audio_data = data[pos:pos+chunk_size]
+        pos += chunk_size
+    sample_rate = fmt.get("sample_rate", 44100)
+    channels = fmt.get("channels", 2)
+    duration = len(audio_data) / (sample_rate * channels * 2) if (sample_rate and channels) else 0.0
+    return fmt, duration, audio_data
+
 try:
     # Wait for ready file
     t0 = time.time()
@@ -473,6 +502,163 @@ try:
     has_riff = len(wav_hdr) >= 44 and wav_hdr[:4] == b"RIFF" and wav_hdr[8:12] == b"WAVE"
     check("real app export_song wav produces valid file with non-zero size",
           r_exp_wav.get("ok") is True and wav_exists and wav_size > 1000 and has_riff)
+
+    # 7c. Multi-bar WAV export with playback running (Bug A & Bug B)
+    # Build a song with at least 4 bars across 2+ channels
+    s_ctrl.send({"id": 110, "op": "tool", "name": "create_song", "args": {"bpm": 120, "pattern_size": 16}})
+    s_ctrl.recv_response(110)
+    s_ctrl.send({"id": 111, "op": "tool", "name": "add_instrument", "args": {"category": "DRUMKIT", "name": "Simple Drumkit"}})
+    r_inst = s_ctrl.recv_response(111)
+    inst1 = r_inst.get("result", {}).get("instrument_index", 1)
+
+    # Piano pattern 0 (bars 0, 2)
+    s_ctrl.send({"id": 112, "op": "tool", "name": "add_notes", "args": {
+        "pattern_index": 0,
+        "notes": [
+            {"note": 60, "position": 0, "length": 2},
+            {"note": 64, "position": 4, "length": 2},
+            {"note": 67, "position": 8, "length": 2},
+            {"note": 72, "position": 12, "length": 2}
+        ]
+    }})
+    s_ctrl.recv_response(112)
+
+    # Drum pattern 1 (bars 0, 1, 2, 3)
+    s_ctrl.send({"id": 113, "op": "tool", "name": "create_pattern", "args": {"instrument_index": inst1}})
+    r_pat1 = s_ctrl.recv_response(113)
+    pat1 = r_pat1.get("result", {}).get("pattern_index", 1)
+    s_ctrl.send({"id": 114, "op": "tool", "name": "add_notes", "args": {
+        "pattern_index": pat1,
+        "notes": [
+            {"note": 36, "position": 0, "length": 1},
+            {"note": 38, "position": 4, "length": 1},
+            {"note": 36, "position": 8, "length": 1},
+            {"note": 38, "position": 12, "length": 1}
+        ]
+    }})
+    s_ctrl.recv_response(114)
+
+    # Piano pattern 2 (bars 1, 3)
+    s_ctrl.send({"id": 115, "op": "tool", "name": "create_pattern", "args": {"instrument_index": 0}})
+    r_pat2 = s_ctrl.recv_response(115)
+    pat2 = r_pat2.get("result", {}).get("pattern_index", 2)
+    s_ctrl.send({"id": 116, "op": "tool", "name": "add_notes", "args": {
+        "pattern_index": pat2,
+        "notes": [
+            {"note": 65, "position": 0, "length": 2},
+            {"note": 69, "position": 4, "length": 2},
+            {"note": 72, "position": 8, "length": 2},
+            {"note": 77, "position": 12, "length": 2}
+        ]
+    }})
+    s_ctrl.recv_response(116)
+
+    # Set arrangement with 4 bars across channels 0 and 1
+    s_ctrl.send({"id": 117, "op": "tool", "name": "set_arrangement", "args": {
+        "entries": [
+            {"bar": 0, "channel": 0, "pattern_index": 0},
+            {"bar": 0, "channel": 1, "pattern_index": pat1},
+            {"bar": 1, "channel": 0, "pattern_index": pat2},
+            {"bar": 1, "channel": 1, "pattern_index": pat1},
+            {"bar": 2, "channel": 0, "pattern_index": 0},
+            {"bar": 2, "channel": 1, "pattern_index": pat1},
+            {"bar": 3, "channel": 0, "pattern_index": pat2},
+            {"bar": 3, "channel": 1, "pattern_index": pat1},
+        ]
+    }})
+    s_ctrl.recv_response(117)
+
+    # Start playback, wait ~1s, then export wav
+    s_ctrl.send({"id": 118, "op": "tool", "name": "play_song", "args": {"action": "play"}})
+    s_ctrl.recv_response(118)
+    time.sleep(1.0)
+
+    s_ctrl.send({"id": 119, "op": "tool", "name": "export_song", "args": {"format": "wav", "name": "smoke_4bar_play"}})
+    r_exp_4bar = s_ctrl.recv_response(119, timeout=25.0)
+    res_4bar = r_exp_4bar.get("result", {})
+    fmt_4bar, dur_4bar, audio_4bar = parse_wav_info(res_4bar.get("path", ""))
+
+    expected_4bar_sec = 4 * 16 * 15.0 / 120.0  # 8.0s
+    dur_4bar_ok = abs(dur_4bar - expected_4bar_sec) <= (0.10 * expected_4bar_sec)
+
+    last_q_bytes = audio_4bar[int(len(audio_4bar) * 0.75):]
+    non_silent_count = 0
+    for i in range(0, len(last_q_bytes) - 1, 2):
+        s = struct.unpack("<h", last_q_bytes[i:i+2])[0]
+        if abs(s) > 50:
+            non_silent_count += 1
+    last_q_has_audio = non_silent_count > 100
+
+    check("whole-song WAV export (while playing) renders ~4 bars (within 10%) and is non-silent in last quarter",
+          r_exp_4bar.get("ok") is True and dur_4bar_ok and last_q_has_audio)
+
+    # 7d. Sub-range export (loop_start=1, loop_end=3) is ~2 bars long; arrangement loop preserved
+    s_ctrl.send({"id": 120, "op": "tool", "name": "get_song_state", "args": {}})
+    r_st_before = s_ctrl.recv_response(120)
+    st_before = r_st_before.get("result", {})
+    loop_start_before = st_before.get("loop_start")
+    loop_end_before = st_before.get("loop_end")
+
+    s_ctrl.send({"id": 121, "op": "tool", "name": "export_song", "args": {
+        "format": "wav",
+        "name": "smoke_subrange",
+        "loop_start": 1,
+        "loop_end": 3
+    }})
+    r_exp_sub = s_ctrl.recv_response(121, timeout=20.0)
+    res_sub = r_exp_sub.get("result", {})
+    fmt_sub, dur_sub, audio_sub = parse_wav_info(res_sub.get("path", ""))
+
+    expected_sub_sec = 2 * 16 * 15.0 / 120.0  # 4.0s
+    dur_sub_ok = abs(dur_sub - expected_sub_sec) <= (0.10 * expected_sub_sec)
+
+    s_ctrl.send({"id": 122, "op": "tool", "name": "get_song_state", "args": {}})
+    r_st_after = s_ctrl.recv_response(122)
+    st_after = r_st_after.get("result", {})
+    loop_start_after = st_after.get("loop_start")
+    loop_end_after = st_after.get("loop_end")
+    loop_restored = (loop_start_before is not None and
+                     loop_start_after == loop_start_before and
+                     loop_end_after == loop_end_before)
+
+    check("sub-range export (loop_start=1, loop_end=3) renders ~2 bars and restores arrangement loop",
+          r_exp_sub.get("ok") is True and dur_sub_ok and loop_restored)
+
+    # 7e. Invalid ranges are rejected with an error
+    invalid_cases = [
+        {"loop_start": 3, "loop_end": 1},
+        {"loop_start": -1, "loop_end": 2},
+        {"loop_start": 0, "loop_end": 10},
+        {"loop_start": 2, "loop_end": 2},
+        {"loop_start": 1.5, "loop_end": 3},
+        {"loop_start": 1, "loop_end": 2.5},
+    ]
+    invalid_rejected = True
+    for idx, case in enumerate(invalid_cases):
+        req_id = 130 + idx
+        c_args = {"format": "wav", "name": f"smoke_inv_{idx}"}
+        c_args.update(case)
+        s_ctrl.send({"id": req_id, "op": "tool", "name": "export_song", "args": c_args})
+        r_inv = s_ctrl.recv_response(req_id, timeout=5.0)
+        res_inv = r_inv.get("result", {})
+        has_error = (r_inv.get("ok") is False) or ("error" in res_inv)
+        if not has_error:
+            invalid_rejected = False
+
+    check("invalid export ranges are rejected with an error", invalid_rejected)
+
+    # 7f. Whole-number float ranges accepted (e.g. 1.0, 3.0 on MIDI export)
+    s_ctrl.send({"id": 140, "op": "tool", "name": "export_song", "args": {
+        "format": "midi",
+        "name": "smoke_float_range",
+        "loop_start": 1.0,
+        "loop_end": 3.0
+    }})
+    r_midi = s_ctrl.recv_response(140, timeout=5.0)
+    res_midi = r_midi.get("result", {})
+    midi_path = res_midi.get("path", "")
+    midi_ok = r_midi.get("ok") is True and os.path.isfile(midi_path) and os.path.getsize(midi_path) > 0
+    check("whole-number float ranges (1.0, 3.0) accepted on export (MIDI)", midi_ok)
 
     # 8. Relay: controller answers viewer relay with relay_result and checks no-controller error
     s_view.send({"id": 10, "op": "relay", "action": "save", "args": {"prompt": "smoke test song"}})
