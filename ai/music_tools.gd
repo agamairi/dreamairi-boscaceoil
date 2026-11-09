@@ -33,7 +33,7 @@ func _register_tools() -> void:
 
 		{"name": "remove_notes", "description": "Remove notes from a pattern by value and position.", "parameters": {"type": "object", "properties": {"pattern_index": {"type": "integer"}, "notes": {"type": "array", "items": {"type": "object", "properties": {"note": {"type": "integer"}, "position": {"type": "integer"}}, "required": ["note", "position"]}}}, "required": ["pattern_index", "notes"]}},
 
-		{"name": "set_arrangement", "description": "Place patterns on timeline. Use -1 to clear a slot.", "parameters": {"type": "object", "properties": {"entries": {"type": "array", "items": {"type": "object", "properties": {"bar": {"type": "integer"}, "channel": {"type": "integer", "description": "0-7"}, "pattern_index": {"type": "integer"}}, "required": ["bar", "channel", "pattern_index"]}}}, "required": ["entries"]}},
+		{"name": "set_arrangement", "description": "Place patterns on timeline and/or set playback loop range. Use -1 to clear a slot.", "parameters": {"type": "object", "properties": {"entries": {"type": "array", "items": {"type": "object", "properties": {"bar": {"type": "integer"}, "channel": {"type": "integer", "description": "0-7"}, "pattern_index": {"type": "integer"}}, "required": ["bar", "channel", "pattern_index"]}}, "loop_start": {"type": "integer", "description": "Start bar (0-based, optional)"}, "loop_end": {"type": "integer", "description": "End bar (1-based exclusive, optional)"}}, "required": []}},
 
 		{"name": "set_effect", "description": "Set global effect. 0=None,1=Delay,2=Chorus,3=Reverb,4=Distortion,5=LowBoost,6=Compressor,7=HighPass.", "parameters": {"type": "object", "properties": {"effect": {"type": "integer"}, "power": {"type": "integer", "default": 50}}, "required": ["effect"]}},
 
@@ -282,22 +282,76 @@ func _set_arrangement(args: Dictionary) -> Dictionary:
 	var song := Controller.current_song
 	if not song:
 		return {"error": "No song loaded"}
+	
+	var old_timeline_length: int = song.arrangement.timeline_length
+	var old_loop_start: int = song.arrangement.loop_start
+	var old_loop_end: int = song.arrangement.loop_end
+	var was_whole_timeline: bool = (old_loop_start == 0 and old_loop_end == old_timeline_length)
+	
 	var placed := 0
-	for e: Variant in args.get("entries", []):
-		var d: Dictionary = _coerce_entry_dict(e)
-		if d.is_empty():
-			continue
-		var bar: int = d.get("bar", 0)
-		var ch: int = d.get("channel", 0)
-		var pi: int = d.get("pattern_index", -1)
-		if bar >= 0 and bar < Arrangement.BAR_NUMBER and ch >= 0 and ch < Arrangement.CHANNEL_NUMBER:
-			if pi < 0:
-				song.arrangement.clear_pattern(bar, ch)
+	if args.has("entries") and args.get("entries") is Array:
+		for e: Variant in args.get("entries", []):
+			var d: Dictionary = _coerce_entry_dict(e)
+			if d.is_empty():
+				continue
+			var bar: int = d.get("bar", 0)
+			var ch: int = d.get("channel", 0)
+			var pi: int = d.get("pattern_index", -1)
+			if bar >= 0 and bar < Arrangement.BAR_NUMBER and ch >= 0 and ch < Arrangement.CHANNEL_NUMBER:
+				if pi < 0:
+					song.arrangement.clear_pattern(bar, ch)
+				else:
+					song.arrangement.set_pattern(bar, ch, pi)
+				placed += 1
+	
+	var new_timeline_length: int = song.arrangement.timeline_length
+	
+	var has_loop_start: bool = args.has("loop_start")
+	var has_loop_end: bool = args.has("loop_end")
+	if has_loop_start or has_loop_end:
+		var target_loop_start: int = 0
+		var target_loop_end: int = new_timeline_length
+		if has_loop_start:
+			var raw_start: Variant = args.get("loop_start")
+			if typeof(raw_start) == TYPE_INT:
+				target_loop_start = int(raw_start)
+			elif typeof(raw_start) == TYPE_FLOAT:
+				var f_start: float = float(raw_start)
+				if not is_finite(f_start) or floorf(f_start) != f_start:
+					return {"error": "Invalid loop_start: %s (must be an integer)" % str(raw_start)}
+				target_loop_start = int(f_start)
 			else:
-				song.arrangement.set_pattern(bar, ch, pi)
-			placed += 1
+				return {"error": "Invalid loop_start: %s (must be an integer)" % str(raw_start)}
+		
+		if has_loop_end:
+			var raw_end: Variant = args.get("loop_end")
+			if typeof(raw_end) == TYPE_INT:
+				target_loop_end = int(raw_end)
+			elif typeof(raw_end) == TYPE_FLOAT:
+				var f_end: float = float(raw_end)
+				if not is_finite(f_end) or floorf(f_end) != f_end:
+					return {"error": "Invalid loop_end: %s (must be an integer)" % str(raw_end)}
+				target_loop_end = int(f_end)
+			else:
+				return {"error": "Invalid loop_end: %s (must be an integer)" % str(raw_end)}
+		
+		if target_loop_start < 0 or target_loop_start >= target_loop_end or target_loop_end > new_timeline_length:
+			return {"error": "Invalid loop range: %d to %d (timeline length: %d)" % [target_loop_start, target_loop_end, new_timeline_length]}
+		
+		song.arrangement.set_loop(target_loop_start, target_loop_end)
+	else:
+		if was_whole_timeline:
+			song.arrangement.set_loop(0, new_timeline_length)
+	
 	song.mark_dirty()
-	return {"success": true, "placed_count": placed, "message": "Set %d arrangement entries" % placed}
+	return {
+		"success": true,
+		"placed_count": placed,
+		"loop_start": song.arrangement.loop_start,
+		"loop_end": song.arrangement.loop_end,
+		"timeline_length": song.arrangement.timeline_length,
+		"message": "Set %d arrangement entries" % placed,
+	}
 
 
 func _set_effect(args: Dictionary) -> Dictionary:
@@ -338,12 +392,14 @@ func _get_song_state(_args: Dictionary) -> Dictionary:
 			if pi >= 0:
 				arr.push_back({"bar": bar, "channel": ch, "pattern_index": pi})
 
+	var song_duration_sec: float = float(song.arrangement.timeline_length * song.pattern_size * 15) / float(maxi(1, song.bpm))
 	return {
 		"success": true,
 		"message": "%d instruments, %d patterns, %d arrangement entries" % [insts.size(), pats.size(), arr.size()],
 		"bpm": song.bpm,
 		"pattern_size": song.pattern_size,
 		"timeline_length": song.arrangement.timeline_length,
+		"song_duration_sec": song_duration_sec,
 		"loop_start": song.arrangement.loop_start,
 		"loop_end": song.arrangement.loop_end,
 		"instruments": insts,
@@ -461,31 +517,45 @@ func _export_song(args: Dictionary) -> Dictionary:
 		song.arrangement.set_loop(loop_start, loop_end)
 		song.reset_arrangement()
 		
+		var start_ticks: int = Time.get_ticks_msec()
+		var state := {
+			"ended": false,
+			"last_buffer_ticks": start_ticks,
+		}
 		var stream_cb := func(event: SiONEvent) -> void:
+			state["last_buffer_ticks"] = Time.get_ticks_msec()
 			exporter.append_data(event.get_stream_buffer())
 		
-		var state := {"ended": false}
 		var on_ended := func() -> void:
 			state["ended"] = true
 		Controller.music_player.export_ended.connect(on_ended, CONNECT_ONE_SHOT)
 		Controller.music_player.start_exporting(stream_cb)
 		
-		var max_wait_sec: float = est_duration_sec + 20.0
-		var start_ticks: int = Time.get_ticks_msec()
-		var timeout_ticks: int = int(max_wait_sec * 1000.0)
+		var stall_cap_ms: int = 10000
+		var hard_cap_ms: int = int((est_duration_sec * 4.0 + 60.0) * 1000.0)
+		var exit_error: String = ""
+		
 		while not state["ended"]:
-			if Time.get_ticks_msec() - start_ticks > timeout_ticks:
+			var now: int = Time.get_ticks_msec()
+			if now - int(state["last_buffer_ticks"]) > stall_cap_ms:
+				exit_error = "WAV export stalled"
+				break
+			if now - start_ticks > hard_cap_ms:
+				exit_error = "WAV export timed out"
 				break
 			await Controller.get_tree().process_frame
 		
-		if not state["ended"]:
-			if Controller.music_player.export_ended.is_connected(on_ended):
-				Controller.music_player.export_ended.disconnect(on_ended)
+		var render_ms: int = Time.get_ticks_msec() - start_ticks
+		
+		if Controller.music_player.export_ended.is_connected(on_ended):
+			Controller.music_player.export_ended.disconnect(on_ended)
+		
+		if exit_error != "":
 			Controller.music_player.cancel_exporting()
 			song.arrangement.set_loop(prev_loop_start, prev_loop_end)
 			song.reset_arrangement()
 			Controller.unlock_song_editing()
-			return {"error": "WAV export timed out"}
+			return {"error": exit_error}
 		
 		var ok: bool = exporter.save()
 		song.arrangement.set_loop(prev_loop_start, prev_loop_end)
@@ -496,10 +566,19 @@ func _export_song(args: Dictionary) -> Dictionary:
 		
 		var file_bytes: PackedByteArray = FileAccess.get_file_as_bytes(target_path)
 		var sha256: String = FileAccess.get_sha256(target_path)
+		var sample_rate: int = exporter._sampling_rate if exporter._sampling_rate > 0 else 44100
+		var rendered_frames: int = exporter._data.size() / 4
+		var duration_sec: float = float(rendered_frames) / float(sample_rate)
+		
 		return {
 			"path": target_path,
 			"bytes": file_bytes.size(),
 			"sha256": sha256,
+			"duration_sec": duration_sec,
+			"bars": loop_bars,
+			"loop_start": loop_start,
+			"loop_end": loop_end,
+			"render_ms": render_ms,
 		}
 	else:
 		return {"error": "Unsupported export format: %s (supported: midi, wav)" % format}

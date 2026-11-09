@@ -215,6 +215,12 @@ try:
     while not os.path.exists(ready):
         if proc.poll() is not None or time.time() - t0 > 40:
             print(f"FAIL: app did not become ready (exit={proc.poll()})", file=sys.stderr)
+            try:
+                log_file.flush()
+                with open(log_path) as lf:
+                    print("APP LOG:\n" + lf.read(), file=sys.stderr)
+            except Exception as e:
+                print(f"could not read log: {e}", file=sys.stderr)
             cleanup()
             sys.exit(1)
         time.sleep(0.2)
@@ -223,14 +229,20 @@ try:
         info = json.load(f)
     port = info["port"]
 
-    # 1. Controller + Viewer connected
-    s_ctrl = Client(port)
-    s_ctrl.send({"op": "hello", "protocol": 1, "secret": secret, "client": "smoke-ctrl"})
-    r_ctrl = s_ctrl.recv_frame()
-
+    # 1. Viewer connected first, verify no_controller error on relay
     s_view = Client(port)
     s_view.send({"op": "hello", "protocol": 1, "secret": viewer_secret, "client": "smoke-view"})
     r_view = s_view.recv_frame()
+    
+    s_view.send({"id": 1, "op": "relay", "action": "save", "args": {"prompt": "before controller"}})
+    res_no_ctrl = s_view.recv_response(1)
+    no_ctrl_ok = (res_no_ctrl.get("ok") is False and res_no_ctrl.get("error") == "no_controller")
+    check("viewer relay without controller returns no_controller", no_ctrl_ok)
+
+    # 2. Controller connected
+    s_ctrl = Client(port)
+    s_ctrl.send({"op": "hello", "protocol": 1, "secret": secret, "client": "smoke-ctrl"})
+    r_ctrl = s_ctrl.recv_frame()
     
     check("controller + viewer connected", r_ctrl.get("ok") and r_view.get("ok"))
 
@@ -566,7 +578,10 @@ try:
             {"bar": 3, "channel": 1, "pattern_index": pat1},
         ]
     }})
-    s_ctrl.recv_response(117)
+    r117 = s_ctrl.recv_response(117)
+    res117 = r117.get("result", {})
+    check("set_arrangement reports loop and timeline",
+          r117.get("ok") is True and res117.get("timeline_length") == 4 and res117.get("loop_end") == 4 and res117.get("loop_start") == 0)
 
     # Start playback, wait ~1s, then export wav
     s_ctrl.send({"id": 118, "op": "tool", "name": "play_song", "args": {"action": "play"}})
@@ -588,9 +603,10 @@ try:
         if abs(s) > 50:
             non_silent_count += 1
     last_q_has_audio = non_silent_count > 100
+    res_fields_ok = (res_4bar.get("bars") == 4 and res_4bar.get("loop_start") == 0 and res_4bar.get("loop_end") == 4 and "duration_sec" in res_4bar and "render_ms" in res_4bar)
 
-    check("whole-song WAV export (while playing) renders ~4 bars (within 10%) and is non-silent in last quarter",
-          r_exp_4bar.get("ok") is True and dur_4bar_ok and last_q_has_audio)
+    check("whole-song WAV export (while playing) renders ~4 bars (within 10%) and has result fields",
+          r_exp_4bar.get("ok") is True and dur_4bar_ok and last_q_has_audio and res_fields_ok)
 
     # 7d. Sub-range export (loop_start=1, loop_end=3) is ~2 bars long; arrangement loop preserved
     s_ctrl.send({"id": 120, "op": "tool", "name": "get_song_state", "args": {}})
@@ -620,9 +636,10 @@ try:
     loop_restored = (loop_start_before is not None and
                      loop_start_after == loop_start_before and
                      loop_end_after == loop_end_before)
+    sub_fields_ok = (res_sub.get("bars") == 2 and res_sub.get("loop_start") == 1 and res_sub.get("loop_end") == 3 and "duration_sec" in res_sub and "render_ms" in res_sub)
 
     check("sub-range export (loop_start=1, loop_end=3) renders ~2 bars and restores arrangement loop",
-          r_exp_sub.get("ok") is True and dur_sub_ok and loop_restored)
+          r_exp_sub.get("ok") is True and dur_sub_ok and loop_restored and sub_fields_ok)
 
     # 7e. Invalid ranges are rejected with an error
     invalid_cases = [
@@ -660,7 +677,7 @@ try:
     midi_ok = r_midi.get("ok") is True and os.path.isfile(midi_path) and os.path.getsize(midi_path) > 0
     check("whole-number float ranges (1.0, 3.0) accepted on export (MIDI)", midi_ok)
 
-    # 8. Relay: controller answers viewer relay with relay_result and checks no-controller error
+    # 8. Relay: controller answers viewer relay with relay_result
     s_view.send({"id": 10, "op": "relay", "action": "save", "args": {"prompt": "smoke test song"}})
     ev_relay = s_ctrl.wait_for_event("relay_request", timeout=3.0)
     rid = ev_relay.get("rid") if ev_relay else -1
@@ -668,28 +685,20 @@ try:
     s_ctrl.send({"op": "relay_result", "rid": rid, "ok": True, "result": {"id": "smoke-log-1", "saved": True}})
     res_relay = s_view.recv_response(10)
     relay_happy = (res_relay.get("ok") is True and res_relay.get("result", {}).get("id") == "smoke-log-1")
+    check("relay answered by controller", relay_happy)
 
-    # Disconnect controller and verify no_controller error
+    # 9. Viewer disconnect does not terminate the app
+    s_view.close()
+    s_view = None
+    time.sleep(0.5)
+    check("viewer disconnect does not terminate the app", proc.poll() is None)
+
+    # 10. Controller disconnect in headless mode terminates the app
     s_ctrl.close()
     s_ctrl = None
-    time.sleep(0.2)
-
-    s_view.send({"id": 11, "op": "relay", "action": "save", "args": {"prompt": "after disconnect"}})
-    res_relay_no_ctrl = s_view.recv_response(11)
-    no_ctrl_ok = (res_relay_no_ctrl.get("ok") is False and res_relay_no_ctrl.get("error") == "no_controller")
-    check("relay answered by controller and no-controller error on disconnect", relay_happy and no_ctrl_ok)
-
-    # 9. Controller shutdown quits the app (exit 0) without hanging on popup even with a dirty song
-    s_ctrl2 = Client(port)
-    s_ctrl2.send({"op": "hello", "protocol": 1, "secret": secret, "client": "smoke-ctrl-2"})
-    r_ctrl2 = s_ctrl2.recv_frame()
-
-    s_ctrl2.send({"id": 99, "op": "shutdown"})
-    r_shutdown = s_ctrl2.recv_response(99)
     proc.wait(timeout=5.0)
     clean_exit = (proc.returncode == 0)
-    check("controller shutdown quits the app (exit 0) without hanging on popup",
-          r_shutdown.get("ok") is True and clean_exit)
+    check("controller disconnect in headless quits the app (exit 0)", clean_exit)
 
 except Exception as ex:
     print(f"Exception during smoke test: {ex}", file=sys.stderr)

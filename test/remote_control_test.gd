@@ -11,6 +11,14 @@ var shutdown_signal_fired: bool = false
 var test_tmp_dir: String = ""
 var _client_buffers: Dictionary = {}
 
+var fake_arrangement: Dictionary = {
+	"timeline_length": 1,
+	"loop_start": 0,
+	"loop_end": 1,
+	"bpm": 120,
+	"pattern_size": 16,
+}
+
 
 func _init() -> void:
 	_run()
@@ -18,7 +26,87 @@ func _init() -> void:
 
 func fake_executor(tool_name: String, args: Dictionary) -> Dictionary:
 	fake_executor_calls.append({"tool": tool_name, "args": args})
-	if tool_name == "custom_test_tool":
+	if tool_name == "set_arrangement":
+		var old_timeline: int = int(fake_arrangement["timeline_length"])
+		var old_start: int = int(fake_arrangement["loop_start"])
+		var old_end: int = int(fake_arrangement["loop_end"])
+		var was_whole: bool = (old_start == 0 and old_end == old_timeline)
+		
+		var placed: int = 0
+		var max_bar: int = old_timeline - 1
+		for e: Variant in args.get("entries", []):
+			if e is Dictionary:
+				var bar: int = int(e.get("bar", 0))
+				if bar > max_bar:
+					max_bar = bar
+				placed += 1
+		var new_timeline: int = maxi(old_timeline, max_bar + 1)
+		fake_arrangement["timeline_length"] = new_timeline
+		
+		var has_ls: bool = args.has("loop_start")
+		var has_le: bool = args.has("loop_end")
+		if has_ls or has_le:
+			var ls: int = 0
+			var le: int = new_timeline
+			if has_ls:
+				var raw_start: Variant = args.get("loop_start")
+				if typeof(raw_start) == TYPE_INT:
+					ls = int(raw_start)
+				elif typeof(raw_start) == TYPE_FLOAT:
+					var f_start: float = float(raw_start)
+					if not is_finite(f_start) or floorf(f_start) != f_start:
+						return {"error": "Invalid loop_start: %s (must be an integer)" % str(raw_start)}
+					ls = int(f_start)
+				else:
+					return {"error": "Invalid loop_start: %s (must be an integer)" % str(raw_start)}
+			else:
+				ls = int(fake_arrangement["loop_start"])
+			if has_le:
+				var raw_end: Variant = args.get("loop_end")
+				if typeof(raw_end) == TYPE_INT:
+					le = int(raw_end)
+				elif typeof(raw_end) == TYPE_FLOAT:
+					var f_end: float = float(raw_end)
+					if not is_finite(f_end) or floorf(f_end) != f_end:
+						return {"error": "Invalid loop_end: %s (must be an integer)" % str(raw_end)}
+					le = int(f_end)
+				else:
+					return {"error": "Invalid loop_end: %s (must be an integer)" % str(raw_end)}
+			else:
+				le = int(fake_arrangement["loop_end"])
+			if ls < 0 or ls >= le or le > new_timeline:
+				return {"error": "Invalid loop range: %d to %d (timeline length: %d)" % [ls, le, new_timeline]}
+			fake_arrangement["loop_start"] = ls
+			fake_arrangement["loop_end"] = le
+		elif was_whole:
+			fake_arrangement["loop_start"] = 0
+			fake_arrangement["loop_end"] = new_timeline
+		
+		return {
+			"success": true,
+			"placed_count": placed,
+			"loop_start": fake_arrangement["loop_start"],
+			"loop_end": fake_arrangement["loop_end"],
+			"timeline_length": fake_arrangement["timeline_length"],
+		}
+	elif tool_name == "get_song_state":
+		var tl: int = int(fake_arrangement["timeline_length"])
+		var ps: int = int(fake_arrangement["pattern_size"])
+		var bpm: int = int(fake_arrangement["bpm"])
+		var dur: float = float(tl * ps * 15) / float(bpm)
+		return {
+			"success": true,
+			"timeline_length": tl,
+			"pattern_size": ps,
+			"bpm": bpm,
+			"loop_start": fake_arrangement["loop_start"],
+			"loop_end": fake_arrangement["loop_end"],
+			"song_duration_sec": dur,
+		}
+	elif tool_name == "slow_tool":
+		await _wait_frames(6)
+		return {"slow": true}
+	elif tool_name == "custom_test_tool":
 		var v: int = int(args.get("val", 0))
 		return {"executed": true, "received_arg": v * 2}
 	elif tool_name == "play_song":
@@ -623,6 +711,153 @@ func _run() -> void:
 	await _wait_frames(3)
 	custom_server.stop()
 	DirAccess.remove_absolute(custom_ready_path)
+	
+	# Check 36: Arrangement tools and loop follows timeline growth
+	var ctrl_arrangement := await _connect_client(port)
+	_send_frame(ctrl_arrangement, {
+		"op": "hello",
+		"protocol": 1,
+		"secret": TEST_SECRET,
+		"client": "test-arrangement"
+	})
+	var _arr_hello := await _read_frame(ctrl_arrangement)
+	
+	# Initial arrangement is 1 bar, loop 0..1. Set bar 3 -> timeline 4, loop widens to 0..4
+	_send_frame(ctrl_arrangement, {
+		"id": 60,
+		"op": "tool",
+		"name": "set_arrangement",
+		"args": {"entries": [{"bar": 3, "channel": 0, "pattern_index": 0}]}
+	})
+	var r60 := await _read_response(ctrl_arrangement)
+	var res60: Dictionary = r60.get("result", {})
+	check("whole-timeline loop follows timeline growth", r60.get("ok") == true and int(res60.get("timeline_length", 0)) == 4 and int(res60.get("loop_start", -1)) == 0 and int(res60.get("loop_end", -1)) == 4)
+	
+	# Check 37: set_arrangement with valid loop args
+	_send_frame(ctrl_arrangement, {
+		"id": 61,
+		"op": "tool",
+		"name": "set_arrangement",
+		"args": {"loop_start": 0, "loop_end": 2}
+	})
+	var r61 := await _read_response(ctrl_arrangement)
+	var res61: Dictionary = r61.get("result", {})
+	check("set_arrangement loop args valid", r61.get("ok") == true and int(res61.get("loop_start", -1)) == 0 and int(res61.get("loop_end", -1)) == 2)
+	
+	# Check 38: narrower loop preserved when timeline grows further
+	_send_frame(ctrl_arrangement, {
+		"id": 62,
+		"op": "tool",
+		"name": "set_arrangement",
+		"args": {"entries": [{"bar": 7, "channel": 0, "pattern_index": 0}]}
+	})
+	var r62 := await _read_response(ctrl_arrangement)
+	var res62: Dictionary = r62.get("result", {})
+	check("narrower loop preserved", r62.get("ok") == true and int(res62.get("timeline_length", 0)) == 8 and int(res62.get("loop_start", -1)) == 0 and int(res62.get("loop_end", -1)) == 2)
+	
+	# Check 39: set_arrangement with invalid loop range
+	_send_frame(ctrl_arrangement, {
+		"id": 63,
+		"op": "tool",
+		"name": "set_arrangement",
+		"args": {"loop_start": 5, "loop_end": 2}
+	})
+	var r63 := await _read_response(ctrl_arrangement)
+	var res63: Dictionary = r63.get("result", {})
+	check("set_arrangement loop args invalid range error", r63.get("ok") == true and res63.has("error") and str(res63.get("error")).contains("Invalid loop range"))
+	
+	# Check 40: get_song_state reports song_duration_sec
+	_send_frame(ctrl_arrangement, {
+		"id": 64,
+		"op": "tool",
+		"name": "get_song_state",
+		"args": {}
+	})
+	var r64 := await _read_response(ctrl_arrangement)
+	var res64: Dictionary = r64.get("result", {})
+	check("get_song_state song_duration_sec", r64.get("ok") == true and is_equal_approx(float(res64.get("song_duration_sec", 0.0)), 16.0))
+	
+	ctrl_arrangement.disconnect_from_host()
+	await _wait_frames(3)
+	
+	# Check 41: viewer disconnect does not request quit
+	shutdown_signal_fired = false
+	var disc_viewer := await _connect_client(port)
+	_send_frame(disc_viewer, {
+		"op": "hello",
+		"protocol": 1,
+		"secret": TEST_VIEWER_SECRET,
+		"client": "disc-viewer"
+	})
+	await _read_frame(disc_viewer)
+	disc_viewer.disconnect_from_host()
+	await _wait_frames(5)
+	check("viewer disconnect does not", shutdown_signal_fired == false)
+	
+	# Check 42: controller disconnect in headless -> quit requested
+	shutdown_signal_fired = false
+	var disc_ctrl := await _connect_client(port)
+	_send_frame(disc_ctrl, {
+		"op": "hello",
+		"protocol": 1,
+		"secret": TEST_SECRET,
+		"client": "disc-ctrl"
+	})
+	await _read_frame(disc_ctrl)
+	disc_ctrl.disconnect_from_host()
+	await _wait_frames(5)
+	check("controller disconnect in headless -> quit requested", shutdown_signal_fired == true)
+	
+	# Check 43: shutdown honoured while busy
+	shutdown_signal_fired = false
+	var busy_ctrl := await _connect_client(port)
+	_send_frame(busy_ctrl, {
+		"op": "hello",
+		"protocol": 1,
+		"secret": TEST_SECRET,
+		"client": "busy-ctrl"
+	})
+	await _read_frame(busy_ctrl)
+	
+	_send_frame(busy_ctrl, {
+		"id": 80,
+		"op": "tool",
+		"name": "slow_tool",
+		"args": {}
+	})
+	_send_frame(busy_ctrl, {
+		"id": 81,
+		"op": "shutdown"
+	})
+	var r_shut := await _read_response(busy_ctrl, 1000)
+	check("shutdown honoured while busy", int(r_shut.get("id", 0)) == 81 and r_shut.get("ok") == true and shutdown_signal_fired == true)
+	busy_ctrl.disconnect_from_host()
+	await _wait_frames(3)
+	
+	# Check 44: frames queued in order while busy
+	shutdown_signal_fired = false
+	var queue_ctrl := await _connect_client(port)
+	_send_frame(queue_ctrl, {
+		"op": "hello",
+		"protocol": 1,
+		"secret": TEST_SECRET,
+		"client": "queue-ctrl"
+	})
+	await _read_frame(queue_ctrl)
+	
+	_send_frame(queue_ctrl, {"id": 90, "op": "tool", "name": "slow_tool", "args": {}})
+	_send_frame(queue_ctrl, {"id": 91, "op": "tool", "name": "custom_test_tool", "args": {"val": 10}})
+	_send_frame(queue_ctrl, {"id": 92, "op": "tool", "name": "custom_test_tool", "args": {"val": 20}})
+	
+	var q90 := await _read_response(queue_ctrl, 2000)
+	var q91 := await _read_response(queue_ctrl, 2000)
+	var q92 := await _read_response(queue_ctrl, 2000)
+	
+	var order_ok: bool = int(q90.get("id", 0)) == 90 and int(q91.get("id", 0)) == 91 and int(q92.get("id", 0)) == 92
+	var vals_ok: bool = int(q91.get("result", {}).get("received_arg", 0)) == 20 and int(q92.get("result", {}).get("received_arg", 0)) == 40
+	check("frames queued in order while busy", order_ok and vals_ok)
+	queue_ctrl.disconnect_from_host()
+	await _wait_frames(3)
 	
 	# Cleanup
 	server.stop()

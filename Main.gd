@@ -11,6 +11,8 @@ const REMOTE_CONTROL_SCRIPT := preload("res://ai/remote_control.gd")
 var _default_window_title: String = ""
 var _remote_control: RemoteControl = null
 var _remote_music_tools: MusicTools = null
+var _parent_pid: int = 0
+var _watchdog_timer: Timer = null
 
 @onready var _pattern_editor: Control = %PatternEditor
 @onready var _locked_indicator: Control = %LockedIndicator
@@ -123,6 +125,10 @@ func _init_remote_control() -> void:
 	
 	MusicTools.output_dir = output_dir
 	
+	var parent_pid: int = int(handoff.get("parent_pid", 0))
+	if parent_pid > 0:
+		_start_parent_watchdog(parent_pid)
+	
 	if Controller.agent_executor and Controller.agent_executor.music_tools:
 		_remote_music_tools = Controller.agent_executor.music_tools
 	else:
@@ -196,7 +202,46 @@ func _on_remote_transport_changed() -> void:
 		_remote_control.notify_transport(is_playing, bar, step)
 
 
+func _start_parent_watchdog(pid: int) -> void:
+	_parent_pid = pid
+	_watchdog_timer = Timer.new()
+	_watchdog_timer.wait_time = 1.0
+	_watchdog_timer.autostart = true
+	_watchdog_timer.timeout.connect(_check_parent_watchdog)
+	add_child(_watchdog_timer)
+
+
+func _is_pid_alive(pid: int) -> bool:
+	if pid <= 0:
+		return false
+	if OS.get_name() == "Windows":
+		var tasklist_output: Array = []
+		var tasklist_result: int = OS.execute("tasklist", PackedStringArray(["/FI", "PID eq %d" % pid, "/NH"]), tasklist_output, true)
+		if tasklist_result != OK:
+			return false
+		for line in tasklist_output:
+			if String(line).contains(str(pid)):
+				return true
+		return false
+	var kill_output: Array = []
+	return OS.execute("kill", PackedStringArray(["-0", str(pid)]), kill_output, true) == OK
+
+
+func _check_parent_watchdog() -> void:
+	if _parent_pid > 0 and not _is_pid_alive(_parent_pid):
+		if Controller.music_player:
+			Controller.music_player.cancel_exporting()
+		Controller.unlock_song_editing()
+		if _remote_control:
+			_remote_control.send_event("closing")
+		get_tree().quit()
+
+
 func _on_remote_shutdown() -> void:
+	if Controller.music_player:
+		Controller.music_player.cancel_exporting()
+	Controller.unlock_song_editing()
+	
 	if DisplayServer.get_name() == "headless":
 		if _remote_control:
 			_remote_control.send_event("closing")

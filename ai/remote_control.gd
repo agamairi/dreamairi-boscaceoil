@@ -57,6 +57,7 @@ class ClientSlot extends RefCounted:
 	var connected_time_ms: int = 0
 	var hello_received: bool = false
 	var busy: bool = false
+	var pending_frames: Array[Dictionary] = []
 	
 	func is_peer_connected() -> bool:
 		return peer != null and peer.get_status() == StreamPeerTCP.STATUS_CONNECTED
@@ -256,9 +257,13 @@ func poll() -> void:
 			_poll_slot(slot)
 	
 	if _controller != null:
+		if not _controller.busy and not _controller.pending_frames.is_empty():
+			_process_pending_frames(_controller)
 		_poll_slot(_controller)
 	
 	if _viewer != null:
+		if not _viewer.busy and not _viewer.pending_frames.is_empty():
+			_process_pending_frames(_viewer)
 		_poll_slot(_viewer)
 	
 	_check_relay_timeouts()
@@ -291,10 +296,7 @@ func _poll_slot(slot: ClientSlot) -> void:
 		if chunk.size() > 0:
 			slot.rx_buffer.append_array(chunk)
 	
-	if slot.busy:
-		return
-	
-	while slot.peer != null and not slot.busy:
+	while slot.peer != null:
 		if slot.expected_frame_len < 0:
 			if slot.rx_buffer.size() < 4:
 				break
@@ -322,7 +324,16 @@ func _poll_slot(slot: ClientSlot) -> void:
 			return
 		
 		var frame: Dictionary = json.data
-		_handle_frame_for_slot(slot, frame)
+		var op: String = str(frame.get("op", ""))
+		
+		if slot.busy:
+			if slot == _controller and op == "shutdown":
+				_handle_immediate_shutdown(slot, frame)
+				return
+			else:
+				slot.pending_frames.push_back(frame)
+		else:
+			_handle_frame_for_slot(slot, frame)
 
 
 func _handle_frame_for_slot(slot: ClientSlot, frame: Dictionary) -> void:
@@ -529,10 +540,37 @@ func _send_slot_frame(slot: ClientSlot, dict: Dictionary) -> Error:
 	return err
 
 
+func _cancel_active_export() -> void:
+	var tree := get_tree()
+	if tree != null and tree.root != null and tree.root.has_node("Controller"):
+		var ctrl: Node = tree.root.get_node("Controller")
+		if ctrl.get("music_player") != null:
+			ctrl.get("music_player").cancel_exporting()
+		ctrl.call("unlock_song_editing")
+
+
+func _handle_immediate_shutdown(slot: ClientSlot, frame: Dictionary) -> void:
+	_cancel_active_export()
+	var req_id: Variant = frame.get("id", null)
+	var reply: Dictionary = {"ok": true, "result": {}}
+	if req_id != null:
+		reply["id"] = req_id
+	_send_slot_frame(slot, reply)
+	shutdown_requested.emit()
+
+
+func _process_pending_frames(slot: ClientSlot) -> void:
+	while slot != null and slot.is_peer_connected() and not slot.busy and not slot.pending_frames.is_empty():
+		var next_frame: Dictionary = slot.pending_frames.pop_front()
+		_handle_frame_for_slot(slot, next_frame)
+
+
 func _close_slot(slot: ClientSlot, _reason: String = "") -> void:
 	var was_authenticated: bool = slot.hello_received
+	var was_controller: bool = (slot == _controller)
 	slot.hello_received = false
 	slot.busy = false
+	slot.pending_frames.clear()
 	
 	if slot.peer != null:
 		slot.peer.disconnect_from_host()
@@ -541,10 +579,13 @@ func _close_slot(slot: ClientSlot, _reason: String = "") -> void:
 	slot.rx_buffer.clear()
 	slot.expected_frame_len = -1
 	
-	if slot == _controller:
+	if was_controller:
 		_controller = null
 		if was_authenticated:
 			client_disconnected.emit()
+			if DisplayServer.get_name() == "headless":
+				_cancel_active_export()
+				shutdown_requested.emit()
 	elif slot == _viewer:
 		_viewer = null
 		if was_authenticated:
@@ -570,6 +611,7 @@ func _execute_tool_async(slot: ClientSlot, req_id: Variant, tool_name: String, a
 		if req_id != null:
 			reply["id"] = req_id
 		_send_slot_frame(slot, reply)
+		_process_pending_frames(slot)
 
 
 func _check_relay_timeouts() -> void:

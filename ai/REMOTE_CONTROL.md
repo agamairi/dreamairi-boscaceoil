@@ -19,7 +19,10 @@ godot --display-driver headless --audio-driver CoreAudio --path /path/to/bosca -
 (Tests and CI use `--audio-driver Dummy`).
 
 In headless engine mode (`DisplayServer.get_name() == "headless"`):
-- A remote `shutdown` op emits the `closing` event and quits immediately (exit 0), without blocking on an unsaved changes popup (the music log is the persistence layer).
+- A remote `shutdown` op emits the `closing` event, cancels any active export, and quits immediately (exit 0), without blocking on an unsaved changes popup (the music log is the persistence layer).
+- A `shutdown` frame from the controller is honoured immediately even when a long-running tool call (e.g. a WAV export) is busy: active export is cancelled, reply is sent, and the engine exits. Other frames received while busy are queued in order and executed after the busy call finishes.
+- When an authenticated `controller` TCP connection closes, the engine cancels any active export, emits `closing`, and exits immediately. Disconnection of a `viewer` client does NOT cause the engine to exit.
+- If `parent_pid` was provided in the handoff JSON, the engine polls `OS.is_process_running(parent_pid)` ~1/sec and exits cleanly if the parent process terminates.
 - In GUI / desktop mode, unsaved edits continue to prompt the save confirmation dialog before exiting.
 
 ### Command-line flags
@@ -41,7 +44,8 @@ The launcher creates a private JSON handoff file (mode 0600 in a 0700 private di
   "secret": "<64 lowercase hex characters>",
   "viewer_secret": "<64 lowercase hex characters, optional>",
   "output_dir": "<absolute directory path>",
-  "ready_file": "<absolute path to ready file>"
+  "ready_file": "<absolute path to ready file>",
+  "parent_pid": 12345
 }
 ```
 
@@ -49,9 +53,10 @@ Upon startup, Bosca:
 1. Reads the handoff file.
 2. Deletes the handoff file immediately.
 3. Validates `protocol == 1`, `secret` (64 hex characters), and ensures `output_dir` exists.
-4. Reads `viewer_secret` if present (64 hex characters, distinct from `secret`). If missing or invalid, the viewer role is disabled.
-5. Binds an ephemeral port on `127.0.0.1`.
-6. Atomically writes the `ready_file` with `{"port": N, "pid": P, "app_version": "1.0"}`.
+4. Reads `parent_pid` if present (> 0); starts an OS process watchdog.
+5. Reads `viewer_secret` if present (64 hex characters, distinct from `secret`). If missing or invalid, the viewer role is disabled.
+6. Binds an ephemeral port on `127.0.0.1`.
+7. Atomically writes the `ready_file` with `{"port": N, "pid": P, "app_version": "1.0"}`.
 
 ---
 
@@ -117,24 +122,35 @@ Reachable via `op: "tool"` (in engine mode, playback remains stopped after start
 
 | Tool | Parameters | Viewer Allowed | Description |
 |---|---|:---:|---|
-| `get_song_state` | `{}` | Yes | Full song state: instruments, patterns, arrangement, effects |
+| `get_song_state` | `{}` | Yes | Full song state: instruments, patterns, arrangement, loop range, and `song_duration_sec` |
 | `get_transport` | `{}` | Yes | Transport status: `{"playing": bool, "bar": int, "step": int, "pattern_size": int, "timeline_length": int, "bpm": int}` |
 | `play_song` | `{"action": "play" \| "stop"}` | Yes | Start or stop playback |
 | `set_tempo` | `{"bpm": 10..450}` | Yes | Set tempo and update synthesizer driver: `{"success": true, "bpm": N}` |
 | `add_notes` | `{"pattern_index": int, "notes": [...]}` | Yes | Add notes (≤ 512 per call) |
 | `remove_notes` | `{"pattern_index": int, "notes": [...]}` | Yes | Remove notes (≤ 512 per call) |
 | `create_pattern` | `{"instrument_index": int, "key": int, "scale": int}` | Yes | Create empty pattern |
-| `set_arrangement` | `{"entries": [{"bar": int, "channel": int, "pattern_index": int}]}` | Yes | Place patterns on arrangement grid |
+| `set_arrangement` | `{"entries": [...]?, "loop_start": int?, "loop_end": int?}` | Yes | Place patterns on arrangement grid and/or set loop range |
 | `list_instruments` | `{"category": str?}` | Yes | List instruments by category |
 | `create_song` | `{"bpm": int, "pattern_size": int, "key": int, "scale": int}` | No | Reset and create a new song |
 | `load_song` | `{"ceol": str}` | No | Parse and load song from ceol text |
 | `snapshot` | `{}` | No | Snapshot song state, ceol text, and MIDI base64 |
 | `save_song` | `{"name": str}` | No | Save song to `<output_dir>/<name>.ceol` |
-| `export_song` | `{"format": "midi" \| "wav", "name": str, "loop_start": int?, "loop_end": int?}` | No | Export song to `<output_dir>/<name>.<ext>` (`format: "wav"` renders offline PCM WAV audio; `"midi"` writes MIDI sequence; by default exports the whole song: bars `0 .. timeline_length`; optional `loop_start` and `loop_end` specify a sub-range) |
+| `export_song` | `{"format": "midi" \| "wav", "name": str, "loop_start": int?, "loop_end": int?}` | No | Export song to `<output_dir>/<name>.<ext>` (`format: "wav"` renders offline PCM WAV audio with stall detection; `"midi"` writes MIDI sequence; by default exports bars `0 .. timeline_length`; optional `loop_start` and `loop_end` specify a sub-range) |
 | `remove_instrument`| `{"instrument_index": int}` | No | Remove instrument by index |
 | `add_instrument` | `{"category": str, "name": str}` | Yes | Add instrument by name (capped at song max of 16) |
 | `set_instrument` | `{"instrument_index": int, "category": str, "name": str}` | Yes | Replace voice of instrument at index: `{"success": true, "instrument_index": N, "category": str, "name": str}` |
 | `set_effect` | `{"effect": int, "power": int}` | No | Configure global effect |
+
+### Arrangement and Loop Handling
+
+- `set_arrangement`: `entries` is optional. Accepts optional `loop_start` and `loop_end` integers (or whole-number floats).
+- Pattern entries are applied first.
+- If loop arguments are provided, `0 <= loop_start < loop_end <= timeline_length` is validated; returns error JSON otherwise with the numbers.
+- If loop arguments are NOT provided:
+  - If the loop previously covered the whole timeline (`loop_start == 0` and `loop_end == old_timeline_length`), it widens or shrinks to stay `0..new_timeline_length`.
+  - A narrower user-set loop is preserved.
+- Result includes `loop_start`, `loop_end`, and `timeline_length`.
+- `get_song_state` additionally reports `song_duration_sec` = `timeline_length * pattern_size * 15 / bpm`.
 
 ### Instrument Changes
 
@@ -151,7 +167,13 @@ Reachable via `op: "tool"` (in engine mode, playback remains stopped after start
 - By default, it renders the entire song arrangement: bars `0 .. timeline_length`.
 - Optional integer arguments `loop_start` and `loop_end` (bars) export a sub-range (`0 <= loop_start < loop_end <= timeline_length`). Whole-number floats (such as `3.0`) are accepted; fractional numbers or invalid ranges are rejected with an error.
 - For `wav` export, playback is stopped first (resetting playback position and arrangement) so rendering starts from the beginning of the export range.
-- The arrangement's original loop range is restored after export completes.
+- Rendering progress is monitored continuously:
+  - Waiting continues while stream buffers keep arriving.
+  - If no new stream buffer arrives for 10 seconds, export fails with `"WAV export stalled"`.
+  - A hard cap of `est_duration * 4 + 60` seconds fails with `"WAV export timed out"`.
+  - On every exit path (success, stall, timeout, error), active playback/export is cancelled, editing is unlocked, and the arrangement's original loop range is restored.
+  - The 10-minute maximum song duration cap remains in effect.
+- Success result returns `duration_sec` (rendered PCM frames / sample rate from exporter data), `bars` (`loop_end - loop_start` rendered), `loop_start`, `loop_end`, `render_ms`, `path`, `bytes`, and `sha256`.
 
 A refused call from a viewer for unauthorized tools returns:
 ```json
